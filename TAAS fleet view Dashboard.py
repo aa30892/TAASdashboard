@@ -1,6 +1,5 @@
 # TAAS Fleet View Dashboard — Material group analysis month-to-month
 # Co-authored with CoCo
-import os
 import io
 import streamlit as st
 import pandas as pd
@@ -41,7 +40,6 @@ def classify_material(desc):
     if not isinstance(desc, str):
         return "Other"
     desc_lower = desc.lower().strip()
-    # Check specific multi-word groups first (longer matches first)
     for group, keywords in sorted(MATERIAL_GROUPS.items(), key=lambda x: -max(len(k) for k in x[1])):
         for kw in keywords:
             if kw in desc_lower:
@@ -49,51 +47,21 @@ def classify_material(desc):
     return "Other"
 
 
-def load_from_snowflake():
-    conn = st.connection("snowflake", ttl=os.getenv("SNOWFLAKE_CONNECTION_TTL"))
-    query = """
-    SELECT
-        CUSTOMER_NAME, PO_POSTING_DATE, PO_POSTING_MONTH,
-        MATERIAL_ID, MATERIAL_DESC, MATERIAL_GROUP_DESC,
-        VEHICLE_ID, LICENCE_PLATE, VENDOR_NAME,
-        JOB_NOTIFICATION_ID, JOB_TYPE_CODE, FLEET_TYPE,
-        PO_QTY, NET_PRICE_EURO
-    FROM PROD.EU_INSIGHT.FOS_PURCHASE_ORDER_DATA
-    WHERE PO_POSTING_YEAR = 2026
-      AND PO_POSTING_MONTH BETWEEN 1 AND 6
-      AND CUSTOMER_NAME ILIKE ANY ('%Transalliance%', '%Garnier%', '%Veolia%',
-                                    '%Taldea%', '%ID Logistics%', '%Eychenne%', '%Chatel%')
-    """
-    return conn.query(query)
-
-
 with st.sidebar:
-    st.header("Data Source")
-    data_source = st.radio(
-        "Load data from:",
-        ["Snowflake (Live)", "Upload File (CSV/Parquet)"],
-        key="data_source",
-    )
+    st.header("Upload Data")
+    uploaded_file = st.file_uploader("Upload PO data (CSV or Parquet)", type=["csv", "parquet"])
 
-    if data_source == "Upload File (CSV/Parquet)":
-        uploaded_file = st.file_uploader("Upload PO data", type=["csv", "parquet"])
-    else:
-        uploaded_file = None
-
-if data_source == "Snowflake (Live)":
-    with st.spinner("Loading data from Snowflake..."):
-        df = load_from_snowflake()
-elif uploaded_file is not None:
-    buf = io.BytesIO(uploaded_file.getvalue())
-    if uploaded_file.name.endswith(".parquet"):
-        df = pd.read_parquet(buf)
-    else:
-        df = pd.read_csv(buf)
-    del buf
-    df.columns = df.columns.str.upper().str.strip()
-else:
-    st.info("Please select a data source or upload a file.")
+if uploaded_file is None:
+    st.info("Please upload PO data file (CSV or Parquet) to proceed. Use the export query in `export_taas_data.sql` to generate the file.")
     st.stop()
+
+buf = io.BytesIO(uploaded_file.getvalue())
+if uploaded_file.name.endswith(".parquet"):
+    df = pd.read_parquet(buf)
+else:
+    df = pd.read_csv(buf)
+del buf
+df.columns = df.columns.str.upper().str.strip()
 
 if df.empty:
     st.warning("No data returned. Check filters or file content.")
