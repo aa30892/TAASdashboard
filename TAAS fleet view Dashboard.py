@@ -73,14 +73,32 @@ if "PO_POSTING_DATE" in df.columns:
 if "PO_POSTING_MONTH" not in df.columns and "PO_POSTING_DATE" in df.columns:
     df["PO_POSTING_MONTH"] = df["PO_POSTING_DATE"].dt.month
 
+# Group customers by TAAS parent name
+CUSTOMER_GROUP_KEYWORDS = ["Transalliance", "Garnier", "Veolia", "Taldea", "ID Logistics", "Eychenne", "Chatel"]
+
+
+def assign_customer_group(name):
+    if not isinstance(name, str):
+        return "Other"
+    name_lower = name.lower()
+    for group in CUSTOMER_GROUP_KEYWORDS:
+        if group.lower() in name_lower:
+            return group
+    return "Other"
+
+
+df["CUSTOMER_GROUP"] = df["CUSTOMER_NAME"].apply(assign_customer_group)
+
 # Classify materials
 df["MATERIAL_GROUP"] = df["MATERIAL_DESC"].apply(classify_material)
 
 # Sidebar filters
 with st.sidebar:
     st.header("Filters")
-    customers = sorted([x for x in df["CUSTOMER_NAME"].dropna().unique() if isinstance(x, str) and x.strip()])
-    selected_customers = st.multiselect("Customer", customers, key="cust_filter")
+    customer_groups = sorted([x for x in df["CUSTOMER_GROUP"].unique() if isinstance(x, str) and x != "Other"])
+    if "Other" in df["CUSTOMER_GROUP"].unique():
+        customer_groups.append("Other")
+    selected_customers = st.multiselect("Customer Group", customer_groups, key="cust_filter")
 
     material_groups = sorted(df["MATERIAL_GROUP"].dropna().unique().tolist())
     selected_groups = st.multiselect("Material Group", material_groups, key="group_filter")
@@ -88,7 +106,7 @@ with st.sidebar:
 # Apply filters
 filtered = df.copy()
 if selected_customers:
-    filtered = filtered[filtered["CUSTOMER_NAME"].isin(selected_customers)]
+    filtered = filtered[filtered["CUSTOMER_GROUP"].isin(selected_customers)]
 if selected_groups:
     filtered = filtered[filtered["MATERIAL_GROUP"].isin(selected_groups)]
 
@@ -181,11 +199,11 @@ pivot_monthly.index.name = "Material Group"
 
 st.dataframe(pivot_monthly, use_container_width=True)
 
-# Per-customer breakdown
-st.subheader("Customer × Material Group")
+# Per-customer group breakdown
+st.subheader("Customer Group × Material Group")
 
 cust_group = (
-    filtered.groupby(["CUSTOMER_NAME", "MATERIAL_GROUP"])
+    filtered.groupby(["CUSTOMER_GROUP", "MATERIAL_GROUP"])
     .agg(
         TOTAL_EURO=("NET_PRICE_EURO", "sum"),
         LINE_COUNT=("PO_QTY", "count"),
@@ -195,8 +213,10 @@ cust_group = (
 )
 
 with st.container(border=True):
-    st.markdown("**€ Spend by Customer and Material Group**")
+    st.markdown("**€ Spend by Customer Group and Material Group**")
     pivot_cust = cust_group.pivot_table(
-        index="CUSTOMER_NAME", columns="MATERIAL_GROUP", values="TOTAL_EURO", fill_value=0
-    ).sort_values(by=list(cust_group["MATERIAL_GROUP"].unique())[:1] if not cust_group.empty else [], ascending=False)
+        index="CUSTOMER_GROUP", columns="MATERIAL_GROUP", values="TOTAL_EURO", fill_value=0
+    )
+    pivot_cust["Total"] = pivot_cust.sum(axis=1)
+    pivot_cust = pivot_cust.sort_values("Total", ascending=False)
     st.dataframe(pivot_cust, use_container_width=True)
