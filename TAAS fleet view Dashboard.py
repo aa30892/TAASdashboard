@@ -10,23 +10,76 @@ st.title("TAAS — General Fleet View Dashboard")
 
 # Material description grouping rules
 MATERIAL_GROUPS = {
-    "Call Out": ["call out", "callout"],
+    "Call Out": [
+        "day-time call-out",
+        "breakdown call handling fee",
+        "extended day-time call-out",
+        "fr highway ext day-time call-out",
+        "fr highway \u2013 day time call out",
+        "fr highway â\u20ac\u201c day time call out",
+        "breakdown call handling",
+        "night-time call-out",
+        "stop&go call management fee",
+        "weekend day-time call-out",
+        "fr highway \u2013 night time call out",
+        "fr highway â\u20ac\u201c night time call out",
+        "weekend night-time call-out",
+        "call-out",
+        "call out",
+        "callout",
+    ],
     "Casing": ["casing"],
     "Geometry": ["geometry"],
-    "Halo": ["halo"],
-    "Handling Fee": ["handling fee", "handling"],
-    "Inspection": ["inspection"],
-    "Misc Services": ["misc", "miscellaneous"],
+    "Halo": ["halo", "ATIS (HALO) TIRE CHANGE", "ATIS (HALO) INITIAL INSTALLATION", "ATIS (HALO) RETORQUE"],
+    "Handling Fee": [
+        "handling fee pwt",
+        "ejob handling fee",
+        "ejob handling fee pwt",
+        "handling fee - bs",
+        "handling fee pwt - bs",
+        "ejob handling fee pwt - bs",
+        "ejob handling fee \u2013 bs",
+        "ejob handling fee â\u20ac\u201c bs",
+        "handling fee",
+    ],
+    "Inspection": ["night inspection supplement", "visual inspection with tread depth meass", "inspection"],
+    "Misc Services": ["fos sp financial adjustment for services", "breakdown - extra cost service", "misc", "miscellaneous"],
     "Mounting": ["mounting"],
-    "Mounting New Tire": ["mounting new tire", "mounting new"],
-    "Mounting Reuse": ["mounting reuse", "reuse"],
+    "Mounting New Tire": ["taking tire off/on wheel (new tire) - bs", "taking tire off/on wheel (new tire)", "mounting new tire", "mounting new"],
+    "Mounting Reuse": ["taking tire off/on wheel(reused tire)-bs", "taking tire off/on wheel (reused tire)", "mounting reuse", "reuse"],
     "Tire": ["tire"],
-    "Regroove": ["regroove"],
-    "Repair": ["repair"],
-    "Rim": ["rim"],
+    "Regroove": ["regrooving block add cost", "regrooving â\u20ac\u201c bs", "regrooving \u2013 bs", "regrooving", "regroove"],
+    "Repair": [
+        "minor repair - bs",
+        "puncture repair",
+        "repair 1h/20km b/f balance repair-bs",
+        "minor repair",
+        "repair 2h/100km b/f balance repair-bs",
+        "fix.6-8am/6-10pm balance repair-bs",
+        "repair 1h15/40km b/f balance repair-bs",
+        "fix.12-2pm balance/repair-bs",
+        "repair 1h30/60km b/f balance repair-bs",
+        "repair 2h30/120km b/f balance repair-bs",
+        "fix.10pm-6am balance repair-bs",
+        "major repair",
+        "repair",
+    ],
+    "Rim": [
+        "turn on rim â\u20ac\u201c bs",
+        "turn on rim \u2013 bs",
+        "turn on rim",
+        "wheel rim steel",
+        "wheel rim â\u20ac\u201c extra cost",
+        "wheel rim \u2013 extra cost",
+        "wheel rim",
+        "rim 1175 - 22.5 alloy",
+        "rim 1175 - 22.5 steel",
+        "rim",
+    ],
     "Small Material": ["small material"],
-    "TPMS": ["tpms"],
-    "Travel": ["travel"],
+    "TPMS": ["tpms sensor allocation", "tpms sensor fitment", "strapping + tpms sensor initialization", "fitment of ps tpms sensor", "tpms"],
+    "Travel": ["travel variable bs", "travel (variable)", "travel"],
+    "DrivePoint": ["DRIVEPOINT VALVE TPMS SENSOR", "ON-VALVE SENSOR FITTED (DRIVEPOINT & Taa"]
     "Truck Tire": ["truck tire"],
 }
 
@@ -76,10 +129,42 @@ if "PO_POSTING_MONTH" not in df.columns and "PO_POSTING_DATE" in df.columns:
 # Group customers by TAAS parent name
 CUSTOMER_GROUP_KEYWORDS = ["Transalliance", "Garnier", "Veolia", "Taldea", "ID Logistics", "Eychenne", "Chatel"]
 
+# Explicit mapping for customers whose names don't contain the group keyword
+CUSTOMER_EXPLICIT_MAP = {
+    "TRANSPORTS DUJEU": "Chatel",
+    "TRANSPORTS LAPERCHE": "Chatel",
+    "TRANSPORTS NICOLLE": "Chatel",
+    "LETNA": "Chatel",
+    "SOLETRANS": "Chatel",
+    "TRANSPORTS JEAN DEVAY": "Chatel",
+    "TRANSPORTS BESNARD": "Chatel",
+    "CONSEILS ET INNOVATION SOLUTIONS": "Chatel",
+    "LATASTE TRANSPORTS": "Taldea",
+    "BL SOLUTIONS": "Taldea",
+    "SARRATIA": "Taldea",
+    "LES TRANSPORTS ROBERT": "Taldea",
+    "TRANSPORTS DUMARTIN": "Taldea",
+    "TRANSPORTS FOIX": "Taldea",
+    "SODITRANS": "Taldea",
+    "TRANSPORTS PEBROCQ": "Taldea",
+    "BS SERVICES": "Taldea",
+    "ELTRANS": "Garnier",
+    "GLT": "Garnier",
+    "TMG": "Garnier",
+    "SOCIETE NOUVELLE COMATA": "Garnier",
+    "TRANSPORTS DANIEL ET DEMONT": "Garnier",
+    "VTB": "Garnier",
+    "TRANSPORTS BONAFINI": "Garnier",
+}
+
 
 def assign_customer_group(name):
     if not isinstance(name, str):
         return "Other"
+    name_upper = name.upper().strip()
+    for key, group in CUSTOMER_EXPLICIT_MAP.items():
+        if key in name_upper:
+            return group
     name_lower = name.lower()
     for group in CUSTOMER_GROUP_KEYWORDS:
         if group.lower() in name_lower:
