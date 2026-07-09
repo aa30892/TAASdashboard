@@ -170,18 +170,16 @@ st.dataframe(
 # Monthly detail table
 st.subheader("Monthly Breakdown")
 
-st.dataframe(
-    month_group.rename(columns={
-        "PO_POSTING_MONTH": "Month #",
-        "MONTH_NAME": "Month",
-        "MATERIAL_GROUP": "Material Group",
-        "TOTAL_QTY": "Total Qty",
-        "TOTAL_EURO": "Total € (Net Price)",
-        "LINE_COUNT": "PO Lines",
-    }).sort_values(["Month #", "Material Group"]),
-    hide_index=True,
-    use_container_width=True,
+pivot_monthly = month_group.pivot_table(
+    index="MATERIAL_GROUP", columns="MONTH_NAME", values="TOTAL_EURO", fill_value=0
 )
+month_order = ["Jan", "Feb", "Mar", "Apr", "May", "Jun"]
+pivot_monthly = pivot_monthly[[m for m in month_order if m in pivot_monthly.columns]]
+pivot_monthly["Total"] = pivot_monthly.sum(axis=1)
+pivot_monthly = pivot_monthly.sort_values("Total", ascending=False)
+pivot_monthly.index.name = "Material Group"
+
+st.dataframe(pivot_monthly, use_container_width=True)
 
 # Per-customer breakdown
 st.subheader("Customer × Material Group")
