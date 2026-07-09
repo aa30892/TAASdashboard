@@ -79,7 +79,7 @@ MATERIAL_GROUPS = {
     "Small Material": ["small material"],
     "TPMS": ["tpms sensor allocation", "tpms sensor fitment", "strapping + tpms sensor initialization", "fitment of ps tpms sensor", "tpms"],
     "Travel": ["travel variable bs", "travel (variable)", "travel"],
-    "DrivePoint": ["DRIVEPOINT VALVE TPMS SENSOR", "ON-VALVE SENSOR FITTED (DRIVEPOINT & Taa"]
+    "DrivePoint": ["drivepoint valve tpms sensor", "on-valve sensor fitted (drivepoint"],
     "Truck Tire": ["truck tire"],
 }
 
