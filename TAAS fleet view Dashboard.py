@@ -212,7 +212,11 @@ month_group = (
 
 month_names = {1: "Jan", 2: "Feb", 3: "Mar", 4: "Apr", 5: "May", 6: "Jun",
                7: "Jul", 8: "Aug", 9: "Sep", 10: "Oct", 11: "Nov", 12: "Dec"}
-month_group["MONTH_NAME"] = month_group["PO_POSTING_MONTH"].map(month_names)
+month_group["MONTH_NAME"] = pd.Categorical(
+    month_group["PO_POSTING_MONTH"].map(month_names),
+    categories=["Jan", "Feb", "Mar", "Apr", "May", "Jun"],
+    ordered=True,
+)
 
 # Pivot for chart: euros by group per month
 col1, col2 = st.columns(2)
@@ -283,6 +287,19 @@ pivot_monthly = pivot_monthly.sort_values("Total", ascending=False)
 pivot_monthly.index.name = "Material Group"
 
 st.dataframe(pivot_monthly, use_container_width=True)
+
+# Monthly quantity table
+st.subheader("Monthly Quantity Breakdown")
+
+pivot_qty = month_group.pivot_table(
+    index="MATERIAL_GROUP", columns="MONTH_NAME", values="TOTAL_QTY", fill_value=0
+)
+pivot_qty = pivot_qty[[m for m in month_order if m in pivot_qty.columns]]
+pivot_qty["Total"] = pivot_qty.sum(axis=1)
+pivot_qty = pivot_qty.sort_values("Total", ascending=False)
+pivot_qty.index.name = "Material Group"
+
+st.dataframe(pivot_qty, use_container_width=True)
 
 # Per-customer group breakdown
 st.subheader("Customer Group × Material Group")
