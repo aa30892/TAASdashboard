@@ -185,3 +185,21 @@ with st.container(border=True):
     pivot_cust["Total"] = pivot_cust.sum(axis=1)
     pivot_cust = pivot_cust.sort_values("Total", ascending=False)
     st.dataframe(pivot_cust, use_container_width=True)
+
+# Per-customer group quantity breakdown
+st.subheader("Customer Group × Material Group — Quantity")
+
+cust_qty = (
+    filtered.groupby(["CUSTOMER_GROUP", "MATERIAL_GROUP"])
+    .agg(TOTAL_QTY=("PO_QTY", "sum"))
+    .reset_index()
+)
+
+with st.container(border=True):
+    st.markdown("**Quantity by Customer Group and Material Group**")
+    pivot_cust_qty = cust_qty.pivot_table(
+        index="CUSTOMER_GROUP", columns="MATERIAL_GROUP", values="TOTAL_QTY", fill_value=0
+    )
+    pivot_cust_qty["Total"] = pivot_cust_qty.sum(axis=1)
+    pivot_cust_qty = pivot_cust_qty.sort_values("Total", ascending=False)
+    st.dataframe(pivot_cust_qty, use_container_width=True)
