@@ -200,4 +200,128 @@ with tab_vendor:
         .reset_index()
     )
     month_vendor["MONTH_NAME"] = month_vendor["PO_POSTING_MONTH"].map(month_names)
-    month_vendor["MO
+    month_vendor["MONTH_NUM"] = month_vendor["PO_POSTING_MONTH"]
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        with st.container(border=True):
+            st.markdown("**€ Total per Vendor by Month**")
+            pivot_euro_v = month_vendor.pivot_table(
+                index=["MONTH_NUM", "MONTH_NAME"], columns="VENDOR_NAME", values="TOTAL_EURO", fill_value=0
+            )
+            pivot_euro_v = pivot_euro_v.sort_index(level="MONTH_NUM")
+            pivot_euro_v = pivot_euro_v.droplevel("MONTH_NUM")
+            st.bar_chart(pivot_euro_v)
+
+    with col2:
+        with st.container(border=True):
+            st.markdown("**Line Count per Vendor by Month**")
+            pivot_count_v = month_vendor.pivot_table(
+                index=["MONTH_NUM", "MONTH_NAME"], columns="VENDOR_NAME", values="LINE_COUNT", fill_value=0
+            )
+            pivot_count_v = pivot_count_v.sort_index(level="MONTH_NUM")
+            pivot_count_v = pivot_count_v.droplevel("MONTH_NUM")
+            st.bar_chart(pivot_count_v)
+
+    st.subheader("Summary by Vendor")
+
+    vendor_summary = (
+        filtered.groupby("VENDOR_NAME")
+        .agg(
+            TOTAL_QTY=("PO_QTY", "sum"),
+            TOTAL_EURO=("NET_PRICE_EURO", "sum"),
+            LINE_COUNT=("PO_QTY", "count"),
+            UNIQUE_MATERIALS=("MATERIAL_DESC", "nunique"),
+        )
+        .reset_index()
+        .sort_values("TOTAL_EURO", ascending=False)
+        .reset_index(drop=True)
+    )
+
+    with st.container(horizontal=True):
+        st.metric("Vendors", len(vendor_summary), border=True)
+        st.metric("Total € Spend", f"{vendor_summary['TOTAL_EURO'].sum():,.2f}", border=True)
+        st.metric("Total Qty", f"{vendor_summary['TOTAL_QTY'].sum():,.0f}", border=True)
+
+    st.dataframe(
+        vendor_summary.rename(columns={
+            "VENDOR_NAME": "Vendor",
+            "TOTAL_QTY": "Total Qty",
+            "TOTAL_EURO": "Total € (Net Price)",
+            "LINE_COUNT": "PO Lines",
+            "UNIQUE_MATERIALS": "Unique Materials",
+        }),
+        hide_index=True,
+        use_container_width=True,
+    )
+
+    st.subheader("Monthly Breakdown")
+
+    pivot_monthly_v = month_vendor.pivot_table(
+        index="VENDOR_NAME", columns="MONTH_NUM", values="TOTAL_EURO", fill_value=0
+    )
+    pivot_monthly_v = pivot_monthly_v.sort_index(axis=1)
+    pivot_monthly_v.columns = [month_names[m] for m in pivot_monthly_v.columns]
+    pivot_monthly_v["Total"] = pivot_monthly_v.sum(axis=1)
+    pivot_monthly_v = pivot_monthly_v.sort_values("Total", ascending=False)
+    pivot_monthly_v.index.name = "Vendor"
+    st.dataframe(pivot_monthly_v, use_container_width=True)
+
+    st.subheader("Monthly Quantity Breakdown")
+
+    pivot_qty_v = month_vendor.pivot_table(
+        index="VENDOR_NAME", columns="MONTH_NUM", values="TOTAL_QTY", fill_value=0
+    )
+    pivot_qty_v = pivot_qty_v.sort_index(axis=1)
+    pivot_qty_v.columns = [month_names[m] for m in pivot_qty_v.columns]
+    pivot_qty_v["Total"] = pivot_qty_v.sum(axis=1)
+    pivot_qty_v = pivot_qty_v.sort_values("Total", ascending=False)
+    pivot_qty_v.index.name = "Vendor"
+    st.dataframe(pivot_qty_v, use_container_width=True)
+
+    st.subheader("Customer Group × Vendor")
+
+    cust_vendor = (
+        filtered.groupby(["CUSTOMER_GROUP", "VENDOR_NAME"])
+        .agg(
+            TOTAL_EURO=("NET_PRICE_EURO", "sum"),
+            LINE_COUNT=("PO_QTY", "count"),
+        )
+        .reset_index()
+        .sort_values("TOTAL_EURO", ascending=False)
+    )
+
+    with st.container(border=True):
+        st.markdown("**€ Spend by Customer Group and Vendor**")
+        pivot_cust_v = cust_vendor.pivot_table(
+            index="CUSTOMER_GROUP", columns="VENDOR_NAME", values="TOTAL_EURO", fill_value=0
+        )
+        pivot_cust_v["Total"] = pivot_cust_v.sum(axis=1)
+        pivot_cust_v = pivot_cust_v.sort_values("Total", ascending=False)
+        st.dataframe(pivot_cust_v, use_container_width=True)
+
+    # Material Group × Vendor Quantity
+    st.subheader("Material Group × Vendor — Quantity")
+
+    available_months_v = sorted(filtered["PO_POSTING_MONTH"].dropna().unique().tolist())
+    month_options_v = {month_names[int(m)]: int(m) for m in available_months_v if int(m) in month_names}
+    selected_months_v = st.multiselect(
+        "Filter by Month", options=list(month_options_v.keys()), default=list(month_options_v.keys()), key="vendor_qty_month_filter"
+    )
+    qty_filtered_v = filtered[filtered["PO_POSTING_MONTH"].isin([month_options_v[m] for m in selected_months_v])]
+
+    vendor_mat_qty = (
+        qty_filtered_v.groupby(["VENDOR_NAME", "MATERIAL_GROUP"])
+        .agg(TOTAL_QTY=("PO_QTY", "sum"))
+        .reset_index()
+    )
+
+    with st.container(border=True):
+        st.markdown("**Quantity by Vendor and Material Group**")
+        pivot_vendor_mat = vendor_mat_qty.pivot_table(
+            index="VENDOR_NAME", columns="MATERIAL_GROUP", values="TOTAL_QTY", fill_value=0
+        )
+        pivot_vendor_mat["Total"] = pivot_vendor_mat.sum(axis=1)
+        pivot_vendor_mat = pivot_vendor_mat.sort_values("Total", ascending=False)
+        st.dataframe(pivot_vendor_mat, use_container_width=True)
