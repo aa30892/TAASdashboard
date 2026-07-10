@@ -8,6 +8,7 @@ import numpy as np
 st.set_page_config(page_title="TAAS Fleet View", layout="wide")
 st.title("TAAS — General Fleet View Dashboard")
 
+MONTH_ORDER = ["Jan", "Feb", "Mar", "Apr", "May", "Jun"]
 
 with st.sidebar:
     st.header("Upload Data")
@@ -64,6 +65,9 @@ st.metric("Total Records", f"{len(filtered):,}", border=True)
 # Month-to-month analysis by material group
 st.subheader("Material Group Totals — Month to Month")
 
+month_names = {1: "Jan", 2: "Feb", 3: "Mar", 4: "Apr", 5: "May", 6: "Jun",
+               7: "Jul", 8: "Aug", 9: "Sep", 10: "Oct", 11: "Nov", 12: "Dec"}
+
 month_group = (
     filtered.groupby(["PO_POSTING_MONTH", "MATERIAL_GROUP"])
     .agg(
@@ -73,14 +77,8 @@ month_group = (
     )
     .reset_index()
 )
-
-month_names = {1: "Jan", 2: "Feb", 3: "Mar", 4: "Apr", 5: "May", 6: "Jun",
-               7: "Jul", 8: "Aug", 9: "Sep", 10: "Oct", 11: "Nov", 12: "Dec"}
-month_group["MONTH_NAME"] = pd.Categorical(
-    month_group["PO_POSTING_MONTH"].map(month_names),
-    categories=["Jan", "Feb", "Mar", "Apr", "May", "Jun"],
-    ordered=True,
-)
+month_group["MONTH_NAME"] = month_group["PO_POSTING_MONTH"].map(month_names)
+month_group["MONTH_NUM"] = month_group["PO_POSTING_MONTH"]
 
 # Pivot for chart: euros by group per month
 col1, col2 = st.columns(2)
@@ -89,19 +87,20 @@ with col1:
     with st.container(border=True):
         st.markdown("**€ Total per Material Group by Month**")
         pivot_euro = month_group.pivot_table(
-            index="MONTH_NAME", columns="MATERIAL_GROUP", values="TOTAL_EURO", fill_value=0
+            index=["MONTH_NUM", "MONTH_NAME"], columns="MATERIAL_GROUP", values="TOTAL_EURO", fill_value=0
         )
-        month_order = ["Jan", "Feb", "Mar", "Apr", "May", "Jun"]
-        pivot_euro = pivot_euro.reindex([m for m in month_order if m in pivot_euro.index])
+        pivot_euro = pivot_euro.sort_index(level="MONTH_NUM")
+        pivot_euro = pivot_euro.droplevel("MONTH_NUM")
         st.bar_chart(pivot_euro)
 
 with col2:
     with st.container(border=True):
         st.markdown("**Line Count per Material Group by Month**")
         pivot_count = month_group.pivot_table(
-            index="MONTH_NAME", columns="MATERIAL_GROUP", values="LINE_COUNT", fill_value=0
+            index=["MONTH_NUM", "MONTH_NAME"], columns="MATERIAL_GROUP", values="LINE_COUNT", fill_value=0
         )
-        pivot_count = pivot_count.reindex([m for m in month_order if m in pivot_count.index])
+        pivot_count = pivot_count.sort_index(level="MONTH_NUM")
+        pivot_count = pivot_count.droplevel("MONTH_NUM")
         st.bar_chart(pivot_count)
 
 # Summary table
@@ -141,10 +140,10 @@ st.dataframe(
 st.subheader("Monthly Breakdown")
 
 pivot_monthly = month_group.pivot_table(
-    index="MATERIAL_GROUP", columns="MONTH_NAME", values="TOTAL_EURO", fill_value=0
+    index="MATERIAL_GROUP", columns="MONTH_NUM", values="TOTAL_EURO", fill_value=0
 )
-month_order = ["Jan", "Feb", "Mar", "Apr", "May", "Jun"]
-pivot_monthly = pivot_monthly[[m for m in month_order if m in pivot_monthly.columns]]
+pivot_monthly = pivot_monthly.sort_index(axis=1)
+pivot_monthly.columns = [month_names[m] for m in pivot_monthly.columns]
 pivot_monthly["Total"] = pivot_monthly.sum(axis=1)
 pivot_monthly = pivot_monthly.sort_values("Total", ascending=False)
 pivot_monthly.index.name = "Material Group"
@@ -155,9 +154,10 @@ st.dataframe(pivot_monthly, use_container_width=True)
 st.subheader("Monthly Quantity Breakdown")
 
 pivot_qty = month_group.pivot_table(
-    index="MATERIAL_GROUP", columns="MONTH_NAME", values="TOTAL_QTY", fill_value=0
+    index="MATERIAL_GROUP", columns="MONTH_NUM", values="TOTAL_QTY", fill_value=0
 )
-pivot_qty = pivot_qty[[m for m in month_order if m in pivot_qty.columns]]
+pivot_qty = pivot_qty.sort_index(axis=1)
+pivot_qty.columns = [month_names[m] for m in pivot_qty.columns]
 pivot_qty["Total"] = pivot_qty.sum(axis=1)
 pivot_qty = pivot_qty.sort_values("Total", ascending=False)
 pivot_qty.index.name = "Material Group"
