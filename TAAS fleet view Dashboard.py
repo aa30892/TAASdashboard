@@ -189,8 +189,15 @@ with st.container(border=True):
 # Per-customer group quantity breakdown
 st.subheader("Customer Group × Material Group — Quantity")
 
+available_months = sorted(filtered["PO_POSTING_MONTH"].dropna().unique().tolist())
+month_options = {month_names[int(m)]: int(m) for m in available_months if int(m) in month_names}
+selected_months_qty = st.multiselect(
+    "Filter by Month", options=list(month_options.keys()), default=list(month_options.keys()), key="qty_month_filter"
+)
+qty_filtered = filtered[filtered["PO_POSTING_MONTH"].isin([month_options[m] for m in selected_months_qty])]
+
 cust_qty = (
-    filtered.groupby(["CUSTOMER_GROUP", "MATERIAL_GROUP"])
+    qty_filtered.groupby(["CUSTOMER_GROUP", "MATERIAL_GROUP"])
     .agg(TOTAL_QTY=("PO_QTY", "sum"))
     .reset_index()
 )
@@ -203,3 +210,4 @@ with st.container(border=True):
     pivot_cust_qty["Total"] = pivot_cust_qty.sum(axis=1)
     pivot_cust_qty = pivot_cust_qty.sort_values("Total", ascending=False)
     st.dataframe(pivot_cust_qty, use_container_width=True)
+
