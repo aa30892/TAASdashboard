@@ -65,7 +65,7 @@ st.metric("Total Records", f"{len(filtered):,}", border=True)
 month_names = {1: "Jan", 2: "Feb", 3: "Mar", 4: "Apr", 5: "May", 6: "Jun",
                7: "Jul", 8: "Aug", 9: "Sep", 10: "Oct", 11: "Nov", 12: "Dec"}
 
-tab_material, tab_vendor, tab_vehicle = st.tabs(["General Fleet View", "By Vendor", "Vehicle Level"])
+tab_material, tab_vendor, tab_vehicle, tab_ai = st.tabs(["General Fleet View", "Service Provider Level", "Vehicle Level", "AI Insights"])
 
 # =============================================================================
 # TAB 1: Material Group Analysis
@@ -468,3 +468,191 @@ with tab_vehicle:
         pivot_veh_count["Total"] = pivot_veh_count.sum(axis=1)
         pivot_veh_count = pivot_veh_count.sort_values("Total", ascending=False)
         st.dataframe(pivot_veh_count, use_container_width=True)
+
+# =============================================================================
+# TAB 4: AI Insights — Cost Reduction & Service Provider Misbehaviour Detection
+# =============================================================================
+with tab_ai:
+    st.subheader("AI Insights — Unnecessary Costs & Service Provider Anomalies")
+    st.markdown(
+        """Statistical analysis to identify **cost reduction opportunities** and
+**service provider misbehaviour** (overcharging, unusual volumes, outlier pricing).
+
+- **Vendor Price Outliers** — Flags vendors whose avg unit price per material group is >1.5 standard deviations and >20% above the group median. Shows potential savings if repriced at median.
+- **Unusual Volume Spikes** — Detects vendor-month combinations where quantity exceeds 2× their own average (possible unnecessary services or billing anomalies).
+- **High-Cost Vehicles** — Identifies vehicles above the 95th percentile spend within their customer group (potential over-servicing).
+- **Vendor Concentration Risk** — Material groups where one vendor captures >70% of spend (dependency risk, limited competitive pricing)."""
+    )
+
+    # --- 1. Vendor Price Outliers per Material Group ---
+    st.subheader("1. Vendor Price Outliers per Material Group")
+    st.caption("Vendors whose average unit price deviates significantly from the group median.")
+
+    vendor_pricing = (
+        filtered.groupby(["VENDOR_NAME", "MATERIAL_GROUP"])
+        .agg(
+            AVG_UNIT_PRICE=("NET_PRICE_EURO", lambda x: x.sum() / max(filtered.loc[x.index, "PO_QTY"].sum(), 1)),
+            TOTAL_EURO=("NET_PRICE_EURO", "sum"),
+            TOTAL_QTY=("PO_QTY", "sum"),
+            LINE_COUNT=("PO_QTY", "count"),
+        )
+        .reset_index()
+    )
+
+    # Compute group median and std
+    group_stats = vendor_pricing.groupby("MATERIAL_GROUP")["AVG_UNIT_PRICE"].agg(["median", "std"]).reset_index()
+    group_stats.columns = ["MATERIAL_GROUP", "GROUP_MEDIAN_PRICE", "GROUP_STD_PRICE"]
+    vendor_pricing = vendor_pricing.merge(group_stats, on="MATERIAL_GROUP", how="left")
+    vendor_pricing["GROUP_STD_PRICE"] = vendor_pricing["GROUP_STD_PRICE"].fillna(0)
+
+    # Z-score
+    vendor_pricing["Z_SCORE"] = np.where(
+        vendor_pricing["GROUP_STD_PRICE"] > 0,
+        (vendor_pricing["AVG_UNIT_PRICE"] - vendor_pricing["GROUP_MEDIAN_PRICE"]) / vendor_pricing["GROUP_STD_PRICE"],
+        0,
+    )
+    vendor_pricing["PCT_ABOVE_MEDIAN"] = np.where(
+        vendor_pricing["GROUP_MEDIAN_PRICE"] > 0,
+        ((vendor_pricing["AVG_UNIT_PRICE"] - vendor_pricing["GROUP_MEDIAN_PRICE"]) / vendor_pricing["GROUP_MEDIAN_PRICE"]) * 100,
+        0,
+    )
+
+    # Flag outliers (z > 1.5 and at least 20% above median)
+    price_outliers = vendor_pricing[
+        (vendor_pricing["Z_SCORE"] > 1.5) & (vendor_pricing["PCT_ABOVE_MEDIAN"] > 20)
+    ].sort_values("TOTAL_EURO", ascending=False)
+
+    if not price_outliers.empty:
+        st.warning(f"⚠ {len(price_outliers)} vendor-material combinations with above-normal pricing detected.")
+        st.dataframe(
+            price_outliers[["VENDOR_NAME", "MATERIAL_GROUP", "AVG_UNIT_PRICE", "GROUP_MEDIAN_PRICE",
+                            "PCT_ABOVE_MEDIAN", "TOTAL_EURO", "TOTAL_QTY"]].rename(columns={
+                "VENDOR_NAME": "Vendor",
+                "MATERIAL_GROUP": "Material Group",
+                "AVG_UNIT_PRICE": "Avg Unit Price (€)",
+                "GROUP_MEDIAN_PRICE": "Group Median (€)",
+                "PCT_ABOVE_MEDIAN": "% Above Median",
+                "TOTAL_EURO": "Total € Spend",
+                "TOTAL_QTY": "Total Qty",
+            }),
+            hide_index=True,
+            use_container_width=True,
+        )
+        potential_savings = (price_outliers["TOTAL_EURO"] - (price_outliers["GROUP_MEDIAN_PRICE"] * price_outliers["TOTAL_QTY"])).clip(lower=0).sum()
+        st.metric("Potential Savings (if priced at median)", f"€{potential_savings:,.2f}", border=True)
+    else:
+        st.success("No significant pricing outliers detected.")
+
+    # --- 2. Unusual Volume Spikes per Vendor ---
+    st.subheader("2. Unusual Volume Spikes per Vendor")
+    st.caption("Vendors with monthly quantity spikes >2x their own average.")
+
+    vendor_monthly = (
+        filtered.groupby(["VENDOR_NAME", "PO_POSTING_MONTH"])
+        .agg(MONTHLY_QTY=("PO_QTY", "sum"), MONTHLY_EURO=("NET_PRICE_EURO", "sum"))
+        .reset_index()
+    )
+    vendor_avg = vendor_monthly.groupby("VENDOR_NAME")["MONTHLY_QTY"].agg(["mean", "std"]).reset_index()
+    vendor_avg.columns = ["VENDOR_NAME", "AVG_MONTHLY_QTY", "STD_MONTHLY_QTY"]
+    vendor_monthly = vendor_monthly.merge(vendor_avg, on="VENDOR_NAME", how="left")
+    vendor_monthly["SPIKE_RATIO"] = np.where(
+        vendor_monthly["AVG_MONTHLY_QTY"] > 0,
+        vendor_monthly["MONTHLY_QTY"] / vendor_monthly["AVG_MONTHLY_QTY"],
+        0,
+    )
+
+    volume_spikes = vendor_monthly[vendor_monthly["SPIKE_RATIO"] > 2.0].sort_values("MONTHLY_EURO", ascending=False)
+
+    if not volume_spikes.empty:
+        volume_spikes["MONTH"] = volume_spikes["PO_POSTING_MONTH"].map(month_names)
+        st.warning(f"⚠ {len(volume_spikes)} vendor-month combinations with volume spikes (>2x average).")
+        st.dataframe(
+            volume_spikes[["VENDOR_NAME", "MONTH", "MONTHLY_QTY", "AVG_MONTHLY_QTY", "SPIKE_RATIO", "MONTHLY_EURO"]].rename(columns={
+                "VENDOR_NAME": "Vendor",
+                "MONTH": "Month",
+                "MONTHLY_QTY": "Month Qty",
+                "AVG_MONTHLY_QTY": "Avg Monthly Qty",
+                "SPIKE_RATIO": "Spike Ratio (×)",
+                "MONTHLY_EURO": "Month € Spend",
+            }),
+            hide_index=True,
+            use_container_width=True,
+        )
+    else:
+        st.success("No unusual volume spikes detected.")
+
+    # --- 3. High-Cost Vehicles (potential over-servicing) ---
+    st.subheader("3. High-Cost Vehicles (Potential Over-Servicing)")
+    st.caption("Vehicles whose total spend exceeds the 95th percentile for their customer group.")
+
+    vehicle_costs = (
+        filtered.groupby(["LICENCE_PLATE", "CUSTOMER_GROUP"])
+        .agg(TOTAL_EURO=("NET_PRICE_EURO", "sum"), TOTAL_QTY=("PO_QTY", "sum"), PO_LINES=("PO_QTY", "count"))
+        .reset_index()
+    )
+    p95 = vehicle_costs.groupby("CUSTOMER_GROUP")["TOTAL_EURO"].quantile(0.95).reset_index()
+    p95.columns = ["CUSTOMER_GROUP", "P95_EURO"]
+    vehicle_costs = vehicle_costs.merge(p95, on="CUSTOMER_GROUP", how="left")
+
+    high_cost_vehicles = vehicle_costs[vehicle_costs["TOTAL_EURO"] > vehicle_costs["P95_EURO"]].sort_values("TOTAL_EURO", ascending=False)
+
+    if not high_cost_vehicles.empty:
+        st.warning(f"⚠ {len(high_cost_vehicles)} vehicles above 95th percentile spend for their customer group.")
+        st.dataframe(
+            high_cost_vehicles[["LICENCE_PLATE", "CUSTOMER_GROUP", "TOTAL_EURO", "P95_EURO", "TOTAL_QTY", "PO_LINES"]].rename(columns={
+                "LICENCE_PLATE": "Licence Plate",
+                "CUSTOMER_GROUP": "Customer Group",
+                "TOTAL_EURO": "Total € Spend",
+                "P95_EURO": "95th Percentile (€)",
+                "TOTAL_QTY": "Total Qty",
+                "PO_LINES": "PO Lines",
+            }),
+            hide_index=True,
+            use_container_width=True,
+        )
+    else:
+        st.success("No high-cost vehicle outliers detected.")
+
+    # --- 4. Material Groups with Disproportionate Vendor Concentration ---
+    st.subheader("4. Vendor Concentration Risk")
+    st.caption("Material groups where a single vendor captures >70% of total spend — potential dependency or lack of competitive pricing.")
+
+    vendor_share = (
+        filtered.groupby(["MATERIAL_GROUP", "VENDOR_NAME"])
+        .agg(VENDOR_EURO=("NET_PRICE_EURO", "sum"))
+        .reset_index()
+    )
+    group_total = filtered.groupby("MATERIAL_GROUP")["NET_PRICE_EURO"].sum().reset_index()
+    group_total.columns = ["MATERIAL_GROUP", "GROUP_TOTAL_EURO"]
+    vendor_share = vendor_share.merge(group_total, on="MATERIAL_GROUP", how="left")
+    vendor_share["SHARE_PCT"] = (vendor_share["VENDOR_EURO"] / vendor_share["GROUP_TOTAL_EURO"]) * 100
+
+    concentrated = vendor_share[vendor_share["SHARE_PCT"] > 70].sort_values("VENDOR_EURO", ascending=False)
+
+    if not concentrated.empty:
+        st.warning(f"⚠ {len(concentrated)} vendor-material combinations with >70% spend concentration.")
+        st.dataframe(
+            concentrated[["MATERIAL_GROUP", "VENDOR_NAME", "VENDOR_EURO", "GROUP_TOTAL_EURO", "SHARE_PCT"]].rename(columns={
+                "MATERIAL_GROUP": "Material Group",
+                "VENDOR_NAME": "Vendor",
+                "VENDOR_EURO": "Vendor € Spend",
+                "GROUP_TOTAL_EURO": "Group Total €",
+                "SHARE_PCT": "Vendor Share (%)",
+            }),
+            hide_index=True,
+            use_container_width=True,
+        )
+    else:
+        st.success("No excessive vendor concentration detected.")
+
+    # --- 5. Summary Metrics ---
+    st.subheader("5. Summary")
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("Price Outliers", len(price_outliers) if not price_outliers.empty else 0, border=True)
+    with col2:
+        st.metric("Volume Spikes", len(volume_spikes) if not volume_spikes.empty else 0, border=True)
+    with col3:
+        st.metric("High-Cost Vehicles", len(high_cost_vehicles) if not high_cost_vehicles.empty else 0, border=True)
+    with col4:
+        st.metric("Concentrated Vendors", len(concentrated) if not concentrated.empty else 0, border=True)
