@@ -65,7 +65,7 @@ st.metric("Total Records", f"{len(filtered):,}", border=True)
 month_names = {1: "Jan", 2: "Feb", 3: "Mar", 4: "Apr", 5: "May", 6: "Jun",
                7: "Jul", 8: "Aug", 9: "Sep", 10: "Oct", 11: "Nov", 12: "Dec"}
 
-tab_material, tab_vendor = st.tabs(["General Fleet View", "By Vendor"])
+tab_material, tab_vendor, tab_vehicle = st.tabs(["General Fleet View", "By Vendor", "Vehicle Level"])
 
 # =============================================================================
 # TAB 1: Material Group Analysis
@@ -325,3 +325,146 @@ with tab_vendor:
         pivot_vendor_mat["Total"] = pivot_vendor_mat.sum(axis=1)
         pivot_vendor_mat = pivot_vendor_mat.sort_values("Total", ascending=False)
         st.dataframe(pivot_vendor_mat, use_container_width=True)
+
+# =============================================================================
+# TAB 3: Vehicle Level Analysis
+# =============================================================================
+with tab_vehicle:
+    st.subheader("Vehicle Totals — Month to Month")
+
+    month_vehicle = (
+        filtered.groupby(["PO_POSTING_MONTH", "LICENCE_PLATE", "CUSTOMER_GROUP"])
+        .agg(
+            TOTAL_QTY=("PO_QTY", "sum"),
+            TOTAL_EURO=("NET_PRICE_EURO", "sum"),
+            LINE_COUNT=("PO_QTY", "count"),
+        )
+        .reset_index()
+    )
+    month_vehicle["MONTH_NAME"] = month_vehicle["PO_POSTING_MONTH"].map(month_names)
+    month_vehicle["MONTH_NUM"] = month_vehicle["PO_POSTING_MONTH"]
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        with st.container(border=True):
+            st.markdown("**€ Total per Customer Group by Month (Vehicle Level)**")
+            pivot_euro_veh = month_vehicle.groupby(["MONTH_NUM", "MONTH_NAME", "CUSTOMER_GROUP"]).agg(
+                TOTAL_EURO=("TOTAL_EURO", "sum")
+            ).reset_index().pivot_table(
+                index=["MONTH_NUM", "MONTH_NAME"], columns="CUSTOMER_GROUP", values="TOTAL_EURO", fill_value=0
+            )
+            pivot_euro_veh = pivot_euro_veh.sort_index(level="MONTH_NUM")
+            pivot_euro_veh = pivot_euro_veh.droplevel("MONTH_NUM")
+            st.bar_chart(pivot_euro_veh)
+
+    with col2:
+        with st.container(border=True):
+            st.markdown("**Vehicle Count per Customer Group by Month**")
+            veh_count = month_vehicle.groupby(["MONTH_NUM", "MONTH_NAME", "CUSTOMER_GROUP"]).agg(
+                VEHICLE_COUNT=("LICENCE_PLATE", "nunique")
+            ).reset_index().pivot_table(
+                index=["MONTH_NUM", "MONTH_NAME"], columns="CUSTOMER_GROUP", values="VEHICLE_COUNT", fill_value=0
+            )
+            veh_count = veh_count.sort_index(level="MONTH_NUM")
+            veh_count = veh_count.droplevel("MONTH_NUM")
+            st.bar_chart(veh_count)
+
+    st.subheader("Summary by Vehicle (Licence Plate)")
+
+    vehicle_summary = (
+        filtered.groupby(["LICENCE_PLATE", "CUSTOMER_GROUP"])
+        .agg(
+            TOTAL_QTY=("PO_QTY", "sum"),
+            TOTAL_EURO=("NET_PRICE_EURO", "sum"),
+            LINE_COUNT=("PO_QTY", "count"),
+            UNIQUE_MATERIALS=("MATERIAL_DESC", "nunique"),
+        )
+        .reset_index()
+        .sort_values("TOTAL_EURO", ascending=False)
+        .reset_index(drop=True)
+    )
+
+    with st.container(horizontal=True):
+        st.metric("Unique Vehicles", filtered["LICENCE_PLATE"].nunique(), border=True)
+        st.metric("Total € Spend", f"{vehicle_summary['TOTAL_EURO'].sum():,.2f}", border=True)
+        st.metric("Total Qty", f"{vehicle_summary['TOTAL_QTY'].sum():,.0f}", border=True)
+
+    st.dataframe(
+        vehicle_summary.rename(columns={
+            "LICENCE_PLATE": "Licence Plate",
+            "CUSTOMER_GROUP": "Customer Group",
+            "TOTAL_QTY": "Total Qty",
+            "TOTAL_EURO": "Total € (Net Price)",
+            "LINE_COUNT": "PO Lines",
+            "UNIQUE_MATERIALS": "Unique Materials",
+        }),
+        hide_index=True,
+        use_container_width=True,
+    )
+
+    st.subheader("Monthly € Breakdown by Customer Group")
+
+    pivot_monthly_veh = (
+        filtered.groupby(["CUSTOMER_GROUP", "PO_POSTING_MONTH"])
+        .agg(TOTAL_EURO=("NET_PRICE_EURO", "sum"))
+        .reset_index()
+        .pivot_table(index="CUSTOMER_GROUP", columns="PO_POSTING_MONTH", values="TOTAL_EURO", fill_value=0)
+    )
+    pivot_monthly_veh = pivot_monthly_veh.sort_index(axis=1)
+    pivot_monthly_veh.columns = [month_names[m] for m in pivot_monthly_veh.columns]
+    pivot_monthly_veh["Total"] = pivot_monthly_veh.sum(axis=1)
+    pivot_monthly_veh = pivot_monthly_veh.sort_values("Total", ascending=False)
+    pivot_monthly_veh.index.name = "Customer Group"
+    st.dataframe(pivot_monthly_veh, use_container_width=True)
+
+    st.subheader("Monthly Quantity Breakdown by Customer Group")
+
+    pivot_qty_veh = (
+        filtered.groupby(["CUSTOMER_GROUP", "PO_POSTING_MONTH"])
+        .agg(TOTAL_QTY=("PO_QTY", "sum"))
+        .reset_index()
+        .pivot_table(index="CUSTOMER_GROUP", columns="PO_POSTING_MONTH", values="TOTAL_QTY", fill_value=0)
+    )
+    pivot_qty_veh = pivot_qty_veh.sort_index(axis=1)
+    pivot_qty_veh.columns = [month_names[m] for m in pivot_qty_veh.columns]
+    pivot_qty_veh["Total"] = pivot_qty_veh.sum(axis=1)
+    pivot_qty_veh = pivot_qty_veh.sort_values("Total", ascending=False)
+    pivot_qty_veh.index.name = "Customer Group"
+    st.dataframe(pivot_qty_veh, use_container_width=True)
+
+    st.subheader("Customer Group × Material Group — Quantity (Vehicle Level)")
+
+    available_months_veh = sorted(filtered["PO_POSTING_MONTH"].dropna().unique().tolist())
+    month_options_veh = {month_names[int(m)]: int(m) for m in available_months_veh if int(m) in month_names}
+    selected_months_veh = st.multiselect(
+        "Filter by Month", options=list(month_options_veh.keys()), default=list(month_options_veh.keys()), key="vehicle_qty_month_filter"
+    )
+    qty_filtered_veh = filtered[filtered["PO_POSTING_MONTH"].isin([month_options_veh[m] for m in selected_months_veh])]
+
+    veh_mat_qty = (
+        qty_filtered_veh.groupby(["CUSTOMER_GROUP", "MATERIAL_GROUP"])
+        .agg(
+            TOTAL_QTY=("PO_QTY", "sum"),
+            VEHICLE_COUNT=("LICENCE_PLATE", "nunique"),
+        )
+        .reset_index()
+    )
+
+    with st.container(border=True):
+        st.markdown("**Quantity by Customer Group and Material Group**")
+        pivot_veh_mat = veh_mat_qty.pivot_table(
+            index="CUSTOMER_GROUP", columns="MATERIAL_GROUP", values="TOTAL_QTY", fill_value=0
+        )
+        pivot_veh_mat["Total"] = pivot_veh_mat.sum(axis=1)
+        pivot_veh_mat = pivot_veh_mat.sort_values("Total", ascending=False)
+        st.dataframe(pivot_veh_mat, use_container_width=True)
+
+    with st.container(border=True):
+        st.markdown("**Vehicle Count by Customer Group and Material Group**")
+        pivot_veh_count = veh_mat_qty.pivot_table(
+            index="CUSTOMER_GROUP", columns="MATERIAL_GROUP", values="VEHICLE_COUNT", fill_value=0
+        )
+        pivot_veh_count["Total"] = pivot_veh_count.sum(axis=1)
+        pivot_veh_count = pivot_veh_count.sort_values("Total", ascending=False)
+        st.dataframe(pivot_veh_count, use_container_width=True)
