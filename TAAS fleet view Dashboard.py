@@ -8,7 +8,7 @@ import numpy as np
 st.set_page_config(page_title="TAAS Fleet View", layout="wide")
 st.title("TAAS — General Fleet View Dashboard")
 
-MONTH_ORDER = ["Jan", "Feb", "Mar", "Apr", "May", "Jun"]
+MONTH_ORDER = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 
 with st.sidebar:
     st.header("Upload Data")
