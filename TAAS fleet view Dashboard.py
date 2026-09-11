@@ -19,16 +19,22 @@ with st.sidebar:
     st.header("Data Source Configuration")
     data_source = st.radio(
         "Select Data Source",
-        ["Upload File", "Use Server File (Local)"],
+        ["Upload Single File", "Upload by Fleet Category (3 files)", "Use Server File (Local)"],
         index=0,
         key="data_source_selection"
     )
 
     uploaded_file = None
     local_file_path = None
+    fleet_files = {}
 
-    if data_source == "Upload File":
+    if data_source == "Upload Single File":
         uploaded_file = st.file_uploader("Upload PO data (CSV or Parquet)", type=["csv", "parquet"])
+    elif data_source == "Upload by Fleet Category (3 files)":
+        st.markdown("Upload one file per fleet category. Each will be tagged with its category automatically.")
+        fleet_files["TAAS"] = st.file_uploader("TAAS file (CSV or Parquet)", type=["csv", "parquet"], key="upload_taas")
+        fleet_files["PPK"] = st.file_uploader("PPK file (CSV or Parquet)", type=["csv", "parquet"], key="upload_ppk")
+        fleet_files["PAYGO"] = st.file_uploader("PAYGO file (CSV or Parquet)", type=["csv", "parquet"], key="upload_paygo")
     else:
         # Scan for CSV files in the script's folder
         available_files = [f for f in os.listdir(SCRIPT_DIR) if f.endswith(".csv")]
@@ -39,9 +45,14 @@ with st.sidebar:
             st.error("No `.csv` files found in the script directory on the server.")
 
 # Halting mechanism if no data source is prepared
-if data_source == "Upload File" and uploaded_file is None:
+if data_source == "Upload Single File" and uploaded_file is None:
     st.info("Please upload PO data file (CSV or Parquet) to proceed. Use the export query in `export_taas_data.sql` to generate the file.")
     st.stop()
+elif data_source == "Upload by Fleet Category (3 files)":
+    uploaded_cats = {k: v for k, v in fleet_files.items() if v is not None}
+    if len(uploaded_cats) == 0:
+        st.info("Please upload at least the TAAS, PPK, and PAYGO files to proceed.")
+        st.stop()
 elif data_source == "Use Server File (Local)" and local_file_path is None:
     st.warning("Please make sure a compatible CSV file is uploaded to the server directory.")
     st.stop()
@@ -49,7 +60,7 @@ elif data_source == "Use Server File (Local)" and local_file_path is None:
 # Load Data based on selection
 @st.cache_data
 def load_data(source_type, upload_obj=None, path_str=None):
-    if source_type == "Upload File" and upload_obj is not None:
+    if source_type == "Upload Single File" and upload_obj is not None:
         buf = io.BytesIO(upload_obj.getvalue())
         if upload_obj.name.endswith(".parquet"):
             df_loaded = pd.read_parquet(buf)
@@ -60,7 +71,28 @@ def load_data(source_type, upload_obj=None, path_str=None):
         return pd.read_csv(path_str)
     return pd.DataFrame()
 
-df = load_data(data_source, upload_obj=uploaded_file, path_str=local_file_path)
+@st.cache_data
+def load_fleet_category_files(file_dict):
+    frames = []
+    for category, file_obj in file_dict.items():
+        if file_obj is not None:
+            buf = io.BytesIO(file_obj.getvalue())
+            if file_obj.name.endswith(".parquet"):
+                part = pd.read_parquet(buf)
+            else:
+                part = pd.read_csv(buf)
+            part.columns = part.columns.str.upper().str.strip()
+            if "FLEET_CATEGORY" not in part.columns:
+                part["FLEET_CATEGORY"] = category
+            frames.append(part)
+    if frames:
+        return pd.concat(frames, ignore_index=True)
+    return pd.DataFrame()
+
+if data_source == "Upload by Fleet Category (3 files)":
+    df = load_fleet_category_files({k: v for k, v in fleet_files.items() if v is not None})
+else:
+    df = load_data(data_source, upload_obj=uploaded_file, path_str=local_file_path)
 df.columns = df.columns.str.upper().str.strip()
 
 if df.empty:
