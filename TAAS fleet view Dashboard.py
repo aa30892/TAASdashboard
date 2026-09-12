@@ -1010,41 +1010,88 @@ against four comparison groups drawn from Pay-Per-Kilometre (PPK) and Pay-As-You
             else:
                 broad_totals = (
                     conclusion_df.groupby("BROAD_GROUP")
-                    .agg(TOTAL_EURO=("NET_PRICE_EURO", "sum"), TOTAL_QTY=("PO_QTY", "sum"))
+                    .agg(
+                        TOTAL_EURO=("NET_PRICE_EURO", "sum"),
+                        TOTAL_QTY=("PO_QTY", "sum"),
+                        UNIQUE_VEHICLES=("LICENCE_PLATE", "nunique"),
+                    )
                 )
                 broad_totals["AVG_UNIT_PRICE"] = broad_totals["TOTAL_EURO"] / broad_totals["TOTAL_QTY"].replace(0, 1)
+                broad_totals["AVG_EURO_PER_VEHICLE"] = (
+                    broad_totals["TOTAL_EURO"] / broad_totals["UNIQUE_VEHICLES"].replace(0, 1)
+                )
                 taas_avg_overall = broad_totals.loc["TAAS", "AVG_UNIT_PRICE"]
+                taas_avg_per_vehicle = broad_totals.loc["TAAS", "AVG_EURO_PER_VEHICLE"]
+                taas_vehicles = broad_totals.loc["TAAS", "UNIQUE_VEHICLES"]
 
                 other_broad_groups = [g for g in ["PPK", "PAYGO"] if g in broad_totals.index]
 
                 if not other_broad_groups:
                     st.info("No PPK or PAYGO data available to compare against TAAS.")
                 else:
+                    def _verdict(pct):
+                        if pct > NORMAL_BAND_PCT:
+                            return "HIGHER", "error"
+                        elif pct < -NORMAL_BAND_PCT:
+                            return "LOWER", "success"
+                        return "NORMAL", "info"
+
                     # --- Headline verdict ---
                     st.markdown("**Headline verdict**")
+                    st.caption(
+                        "Compares both the blended avg €/unit AND the avg €/vehicle, since a fleet "
+                        "category with far more (or fewer) vehicles can look very different per unit "
+                        "than per vehicle — fleet size for each group is shown for context."
+                    )
                     headline_verdicts = {}
                     headline_cols = st.columns(len(other_broad_groups))
                     for col, group in zip(headline_cols, other_broad_groups):
                         other_avg = broad_totals.loc[group, "AVG_UNIT_PRICE"]
-                        pct_diff = ((taas_avg_overall - other_avg) / other_avg * 100) if other_avg else 0.0
-                        if pct_diff > NORMAL_BAND_PCT:
-                            verdict, tone = "HIGHER", "error"
-                        elif pct_diff < -NORMAL_BAND_PCT:
-                            verdict, tone = "LOWER", "success"
-                        else:
-                            verdict, tone = "NORMAL", "info"
-                        headline_verdicts[group] = (verdict, pct_diff, other_avg)
+                        other_avg_veh = broad_totals.loc[group, "AVG_EURO_PER_VEHICLE"]
+                        other_vehicles = broad_totals.loc[group, "UNIQUE_VEHICLES"]
+
+                        pct_diff_unit = ((taas_avg_overall - other_avg) / other_avg * 100) if other_avg else 0.0
+                        pct_diff_veh = (
+                            (taas_avg_per_vehicle - other_avg_veh) / other_avg_veh * 100
+                        ) if other_avg_veh else 0.0
+
+                        unit_verdict, unit_tone = _verdict(pct_diff_unit)
+                        veh_verdict, veh_tone = _verdict(pct_diff_veh)
+                        headline_verdicts[group] = (unit_verdict, pct_diff_unit, veh_verdict, pct_diff_veh)
+
                         with col:
+                            st.markdown(f"**TAAS vs {group}**")
+                            st.caption(
+                                f"Fleet size — TAAS: {taas_vehicles:,.0f} vehicles · "
+                                f"{group}: {other_vehicles:,.0f} vehicles"
+                            )
+                            if taas_vehicles and other_vehicles:
+                                size_ratio = max(taas_vehicles, other_vehicles) / min(taas_vehicles, other_vehicles)
+                                if size_ratio >= 5:
+                                    larger = "TAAS" if taas_vehicles > other_vehicles else group
+                                    st.caption(
+                                        f"⚠ {larger} has {size_ratio:.0f}× more vehicles — per-vehicle "
+                                        "figures reflect very different operating scales."
+                                    )
                             st.metric(
-                                f"TAAS Avg € / Unit  (vs {group})",
+                                "Avg € / Unit",
                                 f"€{taas_avg_overall:,.2f}",
-                                delta=f"{pct_diff:+.1f}% vs {group} (€{other_avg:,.2f})",
+                                delta=f"{pct_diff_unit:+.1f}% vs {group} (€{other_avg:,.2f})",
                                 delta_color="inverse",
                                 border=True,
                             )
-                            getattr(st, tone)(
-                                f"TAAS material costs are **{verdict}** than {group} overall "
-                                f"({pct_diff:+.1f}%)."
+                            st.metric(
+                                "Avg € / Vehicle",
+                                f"€{taas_avg_per_vehicle:,.0f}",
+                                delta=f"{pct_diff_veh:+.1f}% vs {group} (€{other_avg_veh:,.0f})",
+                                delta_color="inverse",
+                                border=True,
+                            )
+                            getattr(st, unit_tone)(
+                                f"Per-unit cost: TAAS is **{unit_verdict}** than {group} ({pct_diff_unit:+.1f}%)."
+                            )
+                            getattr(st, veh_tone)(
+                                f"Per-vehicle cost: TAAS is **{veh_verdict}** than {group} ({pct_diff_veh:+.1f}%)."
                             )
 
                     # --- Material-group level breakdown, per comparison ---
@@ -1112,6 +1159,12 @@ against four comparison groups drawn from Pay-Per-Kilometre (PPK) and Pay-As-You
                                     f"**€{total_impact:+,.0f}** "
                                     f"({'TAAS spends more overall' if total_impact > 0 else 'TAAS spends less overall' if total_impact < 0 else 'net neutral'})."
                                 )
+                                if taas_vehicles:
+                                    impact_per_vehicle = total_impact / taas_vehicles
+                                    impact_msg += (
+                                        f" That's **€{impact_per_vehicle:+,.0f} per TAAS vehicle** "
+                                        f"(across {taas_vehicles:,.0f} vehicles) if TAAS had been priced at {group} rates."
+                                    )
                                 st.markdown(impact_msg)
 
                                 st.dataframe(
