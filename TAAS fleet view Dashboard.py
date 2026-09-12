@@ -6,7 +6,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 
-st.set_page_config(page_title="TAAS Fleet View", layout="wide")
+st.set_page_config(page_title="TAAS PPK PAYGO Fleet View", layout="wide")
 st.title("TAAS — General Fleet View Dashboard")
 
 MONTH_ORDER = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
@@ -14,12 +14,21 @@ MONTH_ORDER = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "O
 # Get the directory where this script is running
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
+# The three independent fleet-type exports this app understands (matches the
+# FLEET_TYPE_GROUP filter in export_taas_data.sql: TAAS / PPK / PAYGO).
+FLEET_TYPE_CATEGORIES = ["TAAS", "PPK", "PAYGO"]
+
 # Sidebar for data loading configuration
 with st.sidebar:
     st.header("Data Source Configuration")
     data_source = st.radio(
         "Select Data Source",
-        ["Upload Single File", "Upload by Fleet Category (3 files)", "Use Server File (Local)"],
+        [
+            "Upload Single File",
+            "Upload by Fleet Category (3 files)",
+            "Use Server File (Local)",
+            "Use Server Files by Category (Local)",
+        ],
         index=0,
         key="data_source_selection"
     )
@@ -27,15 +36,21 @@ with st.sidebar:
     uploaded_file = None
     local_file_path = None
     fleet_files = {}
+    local_fleet_paths = {}
 
     if data_source == "Upload Single File":
         uploaded_file = st.file_uploader("Upload PO data (CSV or Parquet)", type=["csv", "parquet"])
     elif data_source == "Upload by Fleet Category (3 files)":
-        st.markdown("Upload one file per fleet category. Each will be tagged with its category automatically.")
-        fleet_files["TAAS"] = st.file_uploader("TAAS file (CSV or Parquet)", type=["csv", "parquet"], key="upload_taas")
-        fleet_files["PPK"] = st.file_uploader("PPK file (CSV or Parquet)", type=["csv", "parquet"], key="upload_ppk")
-        fleet_files["PAYGO"] = st.file_uploader("PAYGO file (CSV or Parquet)", type=["csv", "parquet"], key="upload_paygo")
-    else:
+        st.markdown(
+            "Upload one file per fleet category (TAAS / PPK / PAYGO). Each is tagged with its "
+            "category automatically if the file doesn't already carry one. You don't need all "
+            "three — any combination of one, two, or three files works."
+        )
+        for category in FLEET_TYPE_CATEGORIES:
+            fleet_files[category] = st.file_uploader(
+                f"{category} file (CSV or Parquet)", type=["csv", "parquet"], key=f"upload_{category.lower()}"
+            )
+    elif data_source == "Use Server File (Local)":
         # Scan for CSV files in the script's folder
         available_files = [f for f in os.listdir(SCRIPT_DIR) if f.endswith(".csv")]
         if available_files:
@@ -43,6 +58,25 @@ with st.sidebar:
             local_file_path = os.path.join(SCRIPT_DIR, selected_filename)
         else:
             st.error("No `.csv` files found in the script directory on the server.")
+    else:  # "Use Server Files by Category (Local)"
+        st.markdown(
+            "Pick one server-side file per fleet category (TAAS / PPK / PAYGO). Files whose "
+            "name contains the category are pre-selected automatically when possible."
+        )
+        available_files = sorted(
+            f for f in os.listdir(SCRIPT_DIR) if f.lower().endswith((".csv", ".parquet"))
+        )
+        if not available_files:
+            st.error("No `.csv` or `.parquet` files found in the script directory on the server.")
+        else:
+            options = ["(none)"] + available_files
+            for category in FLEET_TYPE_CATEGORIES:
+                auto_match = next((f for f in available_files if category.lower() in f.lower()), None)
+                default_idx = options.index(auto_match) if auto_match in options else 0
+                choice = st.selectbox(
+                    f"{category} file", options, index=default_idx, key=f"local_cat_{category.lower()}"
+                )
+                local_fleet_paths[category] = None if choice == "(none)" else os.path.join(SCRIPT_DIR, choice)
 
 # Halting mechanism if no data source is prepared
 if data_source == "Upload Single File" and uploaded_file is None:
@@ -51,11 +85,16 @@ if data_source == "Upload Single File" and uploaded_file is None:
 elif data_source == "Upload by Fleet Category (3 files)":
     uploaded_cats = {k: v for k, v in fleet_files.items() if v is not None}
     if len(uploaded_cats) == 0:
-        st.info("Please upload at least the TAAS, PPK, and PAYGO files to proceed.")
+        st.info("Please upload at least one of the TAAS, PPK, or PAYGO files to proceed.")
         st.stop()
 elif data_source == "Use Server File (Local)" and local_file_path is None:
     st.warning("Please make sure a compatible CSV file is uploaded to the server directory.")
     st.stop()
+elif data_source == "Use Server Files by Category (Local)":
+    selected_local_cats = {k: v for k, v in local_fleet_paths.items() if v is not None}
+    if len(selected_local_cats) == 0:
+        st.info("Please select at least one of the TAAS, PPK, or PAYGO files to proceed.")
+        st.stop()
 
 # Load Data based on selection
 @st.cache_data
@@ -71,26 +110,46 @@ def load_data(source_type, upload_obj=None, path_str=None):
         return pd.read_csv(path_str)
     return pd.DataFrame()
 
-@st.cache_data
-def load_fleet_category_files(file_dict):
-    frames = []
-    for category, file_obj in file_dict.items():
-        if file_obj is not None:
-            buf = io.BytesIO(file_obj.getvalue())
-            if file_obj.name.endswith(".parquet"):
-                part = pd.read_parquet(buf)
-            else:
-                part = pd.read_csv(buf)
-            part.columns = part.columns.str.upper().str.strip()
-            if "FLEET_CATEGORY" not in part.columns:
-                part["FLEET_CATEGORY"] = category
-            frames.append(part)
-    if frames:
-        return pd.concat(frames, ignore_index=True)
-    return pd.DataFrame()
+def _read_any_source(source):
+    """Read a CSV/Parquet source into a DataFrame, whether it's an uploaded
+    file object (has getvalue()/name) or a local file path string."""
+    if hasattr(source, "getvalue"):
+        name = source.name
+        buf = io.BytesIO(source.getvalue())
+        if name.lower().endswith(".parquet"):
+            return pd.read_parquet(buf)
+        return pd.read_csv(buf)
+    path_str = str(source)
+    if path_str.lower().endswith(".parquet"):
+        return pd.read_parquet(path_str)
+    return pd.read_csv(path_str)
 
+@st.cache_data
+def load_fleet_category_sources(source_dict):
+    """source_dict: {category_name: uploaded_file_or_local_path_or_None}.
+    Returns (combined_df, list_of_categories_actually_loaded)."""
+    frames = []
+    loaded_categories = []
+    for category, source in source_dict.items():
+        if source is None:
+            continue
+        part = _read_any_source(source)
+        part.columns = part.columns.str.upper().str.strip()
+        if "FLEET_CATEGORY" not in part.columns:
+            part["FLEET_CATEGORY"] = category
+        if "FLEET_TYPE_GROUP" not in part.columns:
+            part["FLEET_TYPE_GROUP"] = category
+        frames.append(part)
+        loaded_categories.append(category)
+    if frames:
+        return pd.concat(frames, ignore_index=True, sort=False), loaded_categories
+    return pd.DataFrame(), loaded_categories
+
+loaded_categories = None  # only meaningful for the two by-category data sources
 if data_source == "Upload by Fleet Category (3 files)":
-    df = load_fleet_category_files({k: v for k, v in fleet_files.items() if v is not None})
+    df, loaded_categories = load_fleet_category_sources({k: v for k, v in fleet_files.items() if v is not None})
+elif data_source == "Use Server Files by Category (Local)":
+    df, loaded_categories = load_fleet_category_sources({k: v for k, v in local_fleet_paths.items() if v is not None})
 else:
     df = load_data(data_source, upload_obj=uploaded_file, path_str=local_file_path)
 df.columns = df.columns.str.upper().str.strip()
@@ -98,6 +157,14 @@ df.columns = df.columns.str.upper().str.strip()
 if df.empty:
     st.warning("No data returned. Check filters or file content.")
     st.stop()
+
+# Let the user see, at a glance, which of the three fleet-type files are loaded.
+if loaded_categories is not None:
+    missing_categories = [c for c in FLEET_TYPE_CATEGORIES if c not in loaded_categories]
+    status_msg = f"Loaded: {', '.join(loaded_categories)}"
+    if missing_categories:
+        status_msg += f"  •  Not loaded: {', '.join(missing_categories)}"
+    st.sidebar.success(status_msg)
 
 # Validate required columns exist
 REQUIRED_COLUMNS = {"PO_QTY", "NET_PRICE_EURO", "PO_POSTING_MONTH", "MATERIAL_GROUP"}
@@ -123,6 +190,8 @@ if "MATERIAL_GROUP" not in df.columns:
     df["MATERIAL_GROUP"] = "Other"
 if "FLEET_CATEGORY" not in df.columns and "CUSTOMER_GROUP" in df.columns:
     df["FLEET_CATEGORY"] = "Other"
+if "FLEET_TYPE_GROUP" not in df.columns:
+    df["FLEET_TYPE_GROUP"] = "Other"
 
 # Sidebar filters
 with st.sidebar:
@@ -143,6 +212,24 @@ with st.sidebar:
     else:
         selected_fleet_cats = []
 
+    if "FLEET_TYPE" in df.columns:
+        fleet_types = sorted([x for x in df["FLEET_TYPE"].unique() if isinstance(x, str) and x != "Other"])
+        if "Other" in df["FLEET_TYPE"].unique():
+            fleet_types.append("Other")
+        selected_fleet_types = st.multiselect("Fleet Type", fleet_types, key="fleet_type_filter")
+    else:
+        selected_fleet_types = []
+
+    if "FLEET_TYPE_GROUP" in df.columns:
+        fleet_type_groups = sorted([x for x in df["FLEET_TYPE_GROUP"].unique() if isinstance(x, str) and x != "Other"])
+        if "Other" in df["FLEET_TYPE_GROUP"].unique():
+            fleet_type_groups.append("Other")
+        selected_fleet_type_groups = st.multiselect(
+            "Fleet Type Group (TAAS / PPK / PAYGO)", fleet_type_groups, key="fleet_type_group_filter"
+        )
+    else:
+        selected_fleet_type_groups = []
+
 # Apply filters
 filtered = df.copy()
 if selected_customers:
@@ -151,6 +238,10 @@ if selected_groups:
     filtered = filtered[filtered["MATERIAL_GROUP"].isin(selected_groups)]
 if selected_fleet_cats:
     filtered = filtered[filtered["FLEET_CATEGORY"].isin(selected_fleet_cats)]
+if selected_fleet_types:
+    filtered = filtered[filtered["FLEET_TYPE"].isin(selected_fleet_types)]
+if selected_fleet_type_groups:
+    filtered = filtered[filtered["FLEET_TYPE_GROUP"].isin(selected_fleet_type_groups)]
 
 st.metric("Total Records", f"{len(filtered):,}", border=True)
 
@@ -736,11 +827,24 @@ against four comparison groups drawn from Pay-Per-Kilometre (PPK) and Pay-As-You
             "Re-export using the latest `export_taas_data.sql` which includes this column."
         )
     else:
-        CATEGORIES = ["TAAS", "Best PPK", "Worst PPK", "Best PAYGO", "Worst PAYGO"]
+        # Preferred display order for the granular categories the SQL export produces,
+        # plus the broad TAAS/PPK/PAYGO labels used as a fallback when a file was loaded
+        # via "Upload/Use Server Files by Category" without its own FLEET_CATEGORY column.
+        # This list is only used for ORDERING — the tab works fine with any subset of it
+        # (one, two, or all categories present), so loading e.g. only TAAS + PPK is fine.
+        PREFERRED_CATEGORY_ORDER = [
+            "TAAS", "Best PPK", "Worst PPK", "PPK", "Best PAYGO", "Worst PAYGO", "PAYGO"
+        ]
+        cats_in_data = [x for x in filtered["FLEET_CATEGORY"].dropna().unique() if x != "Other"]
+        CATEGORIES = [c for c in PREFERRED_CATEGORY_ORDER if c in cats_in_data]
+        # Keep any other non-standard category labels too, appended at the end, so a
+        # differently-tagged file still shows up instead of being silently dropped.
+        CATEGORIES += sorted(c for c in cats_in_data if c not in PREFERRED_CATEGORY_ORDER)
+
         bench_df = filtered[filtered["FLEET_CATEGORY"].isin(CATEGORIES)].copy()
 
         if bench_df.empty:
-            st.warning("No data for the fleet categories in the current filters.")
+            st.warning("No data for the recognized fleet categories (TAAS / PPK / PAYGO) in the current filters.")
         else:
             present_cats = [c for c in CATEGORIES if c in bench_df["FLEET_CATEGORY"].unique()]
 
