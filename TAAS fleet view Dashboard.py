@@ -6,8 +6,8 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 
-st.set_page_config(page_title="TAAS PPK PAYGO Fleet View", layout="wide")
-st.title("TAAS — General Fleet View Dashboard")
+st.set_page_config(page_title="Fleet View", layout="wide")
+st.title("Fleet — General Fleet View Dashboard")
 
 MONTH_ORDER = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 
@@ -818,6 +818,7 @@ against four comparison groups drawn from Pay-Per-Kilometre (PPK) and Pay-As-You
 5. **Monthly Trends** — spot seasonal patterns or divergence over time
 6. **Avg € per Vehicle by Month** — normalised efficiency trend (removes fleet-size bias)
 7. **TAAS vs Others Difference** — the bottom-line table: positive values mean the other category pays *more* per unit than TAAS
+8. **Conclusion — TAAS vs PPK vs PAYGO (Global)** — Best + Worst PPK rolled into one PPK benchmark, Best + Worst PAYGO rolled into one PAYGO benchmark: the direct answer to "are TAAS material costs higher, lower, or normal?"
 """
     )
 
@@ -979,6 +980,163 @@ against four comparison groups drawn from Pay-Per-Kilometre (PPK) and Pay-As-You
                 st.dataframe(diff_table.style.format("€{:+,.2f}"), use_container_width=True)
             else:
                 st.info("TAAS data not available for difference calculation.")
+
+            # --- 8. Conclusion — TAAS vs PPK vs PAYGO (Global) ---
+            st.divider()
+            st.subheader("8. Conclusion — TAAS vs PPK vs PAYGO (Global)")
+            st.markdown(
+                "Rolls **Best + Worst PPK** into one PPK benchmark and **Best + Worst PAYGO** into "
+                "one PAYGO benchmark, then answers the core question directly: overall, are **TAAS** "
+                "material costs **higher, lower, or normal** compared to PPK and PAYGO fleets?"
+            )
+
+            NORMAL_BAND_PCT = 5.0  # within +/- this % of the benchmark counts as "Normal / comparable"
+
+            def _broad_fleet_group(cat):
+                if cat == "TAAS":
+                    return "TAAS"
+                if "PPK" in cat:
+                    return "PPK"
+                if "PAYGO" in cat:
+                    return "PAYGO"
+                return None
+
+            conclusion_df = bench_df.copy()
+            conclusion_df["BROAD_GROUP"] = conclusion_df["FLEET_CATEGORY"].apply(_broad_fleet_group)
+            conclusion_df = conclusion_df[conclusion_df["BROAD_GROUP"].notna()]
+
+            if "TAAS" not in conclusion_df["BROAD_GROUP"].unique():
+                st.info("TAAS data not available for the global conclusion.")
+            else:
+                broad_totals = (
+                    conclusion_df.groupby("BROAD_GROUP")
+                    .agg(TOTAL_EURO=("NET_PRICE_EURO", "sum"), TOTAL_QTY=("PO_QTY", "sum"))
+                )
+                broad_totals["AVG_UNIT_PRICE"] = broad_totals["TOTAL_EURO"] / broad_totals["TOTAL_QTY"].replace(0, 1)
+                taas_avg_overall = broad_totals.loc["TAAS", "AVG_UNIT_PRICE"]
+
+                other_broad_groups = [g for g in ["PPK", "PAYGO"] if g in broad_totals.index]
+
+                if not other_broad_groups:
+                    st.info("No PPK or PAYGO data available to compare against TAAS.")
+                else:
+                    # --- Headline verdict ---
+                    st.markdown("**Headline verdict**")
+                    headline_verdicts = {}
+                    headline_cols = st.columns(len(other_broad_groups))
+                    for col, group in zip(headline_cols, other_broad_groups):
+                        other_avg = broad_totals.loc[group, "AVG_UNIT_PRICE"]
+                        pct_diff = ((taas_avg_overall - other_avg) / other_avg * 100) if other_avg else 0.0
+                        if pct_diff > NORMAL_BAND_PCT:
+                            verdict, tone = "HIGHER", "error"
+                        elif pct_diff < -NORMAL_BAND_PCT:
+                            verdict, tone = "LOWER", "success"
+                        else:
+                            verdict, tone = "NORMAL", "info"
+                        headline_verdicts[group] = (verdict, pct_diff, other_avg)
+                        with col:
+                            st.metric(
+                                f"TAAS Avg € / Unit  (vs {group})",
+                                f"€{taas_avg_overall:,.2f}",
+                                delta=f"{pct_diff:+.1f}% vs {group} (€{other_avg:,.2f})",
+                                delta_color="inverse",
+                                border=True,
+                            )
+                            getattr(st, tone)(
+                                f"TAAS material costs are **{verdict}** than {group} overall "
+                                f"({pct_diff:+.1f}%)."
+                            )
+
+                    # --- Material-group level breakdown, per comparison ---
+                    st.markdown("**Material Group Breakdown**")
+                    st.caption(
+                        "Per material group: TAAS's own avg €/unit vs each benchmark's avg €/unit, the % "
+                        "difference, a Higher/Lower/Normal verdict (±{:.0f}% band), and the € impact at "
+                        "TAAS's own volume (positive = TAAS spent more than it would have at the "
+                        "benchmark's rate; negative = TAAS spent less).".format(NORMAL_BAND_PCT)
+                    )
+
+                    mg_totals = (
+                        conclusion_df.groupby(["BROAD_GROUP", "MATERIAL_GROUP"])
+                        .agg(TOTAL_EURO=("NET_PRICE_EURO", "sum"), TOTAL_QTY=("PO_QTY", "sum"))
+                        .reset_index()
+                    )
+                    mg_totals["AVG_UNIT_PRICE"] = mg_totals["TOTAL_EURO"] / mg_totals["TOTAL_QTY"].replace(0, 1)
+                    taas_mg = mg_totals[mg_totals["BROAD_GROUP"] == "TAAS"].set_index("MATERIAL_GROUP")
+
+                    verdict_rows = []
+                    for group in other_broad_groups:
+                        other_mg = mg_totals[mg_totals["BROAD_GROUP"] == group].set_index("MATERIAL_GROUP")
+                        for mg in taas_mg.index.intersection(other_mg.index):
+                            taas_price = taas_mg.loc[mg, "AVG_UNIT_PRICE"]
+                            other_price = other_mg.loc[mg, "AVG_UNIT_PRICE"]
+                            taas_qty = taas_mg.loc[mg, "TOTAL_QTY"]
+                            pct = ((taas_price - other_price) / other_price * 100) if other_price else 0.0
+                            if pct > NORMAL_BAND_PCT:
+                                mg_verdict = "▲ Higher"
+                            elif pct < -NORMAL_BAND_PCT:
+                                mg_verdict = "▼ Lower"
+                            else:
+                                mg_verdict = "≈ Normal"
+                            verdict_rows.append({
+                                "Comparison": group,
+                                "Material Group": mg,
+                                "TAAS Avg €/Unit": taas_price,
+                                "Benchmark Avg €/Unit": other_price,
+                                "Diff (%)": pct,
+                                "Verdict": mg_verdict,
+                                "€ Impact (at TAAS Volume)": (taas_price - other_price) * taas_qty,
+                            })
+
+                    if not verdict_rows:
+                        st.info("No overlapping material groups between TAAS and the PPK/PAYGO benchmarks.")
+                    else:
+                        verdict_df = pd.DataFrame(verdict_rows)
+
+                        for group in other_broad_groups:
+                            group_df = verdict_df[verdict_df["Comparison"] == group].sort_values(
+                                "€ Impact (at TAAS Volume)", ascending=False
+                            )
+                            with st.container(border=True):
+                                st.markdown(f"**TAAS vs {group} — by Material Group**")
+                                counts = group_df["Verdict"].value_counts()
+                                summary_cols = st.columns(4)
+                                summary_cols[0].metric("Material Groups Compared", len(group_df), border=True)
+                                summary_cols[1].metric("Higher (TAAS costs more)", int(counts.get("▲ Higher", 0)), border=True)
+                                summary_cols[2].metric("Normal / Comparable", int(counts.get("≈ Normal", 0)), border=True)
+                                summary_cols[3].metric("Lower (TAAS costs less)", int(counts.get("▼ Lower", 0)), border=True)
+
+                                total_impact = group_df["€ Impact (at TAAS Volume)"].sum()
+                                impact_msg = (
+                                    f"Net € impact vs {group} at TAAS's own volume: "
+                                    f"**€{total_impact:+,.0f}** "
+                                    f"({'TAAS spends more overall' if total_impact > 0 else 'TAAS spends less overall' if total_impact < 0 else 'net neutral'})."
+                                )
+                                st.markdown(impact_msg)
+
+                                st.dataframe(
+                                    group_df.drop(columns=["Comparison"]).style.format({
+                                        "TAAS Avg €/Unit": "€{:,.2f}",
+                                        "Benchmark Avg €/Unit": "€{:,.2f}",
+                                        "Diff (%)": "{:+.1f}%",
+                                        "€ Impact (at TAAS Volume)": "€{:+,.0f}",
+                                    }),
+                                    hide_index=True,
+                                    use_container_width=True,
+                                )
+
+                                top_driver = group_df.iloc[0] if not group_df.empty else None
+                                top_saver = group_df.iloc[-1] if not group_df.empty else None
+                                if top_driver is not None and top_driver["€ Impact (at TAAS Volume)"] > 0:
+                                    st.caption(
+                                        f"Biggest cost driver vs {group}: **{top_driver['Material Group']}** "
+                                        f"({top_driver['Diff (%)']:+.1f}%, €{top_driver['€ Impact (at TAAS Volume)']:+,.0f})."
+                                    )
+                                if top_saver is not None and top_saver["€ Impact (at TAAS Volume)"] < 0:
+                                    st.caption(
+                                        f"Biggest saving vs {group}: **{top_saver['Material Group']}** "
+                                        f"({top_saver['Diff (%)']:+.1f}%, €{top_saver['€ Impact (at TAAS Volume)']:+,.0f})."
+                                    )
 
 # =============================================================================
 # TAB 6: AI Insights — Cost Reduction & Service Provider Misbehaviour Detection
