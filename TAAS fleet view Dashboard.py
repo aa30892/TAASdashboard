@@ -304,7 +304,7 @@ st.metric("Total Records", f"{len(filtered):,}", border=True)
 month_names = {1: "Jan", 2: "Feb", 3: "Mar", 4: "Apr", 5: "May", 6: "Jun",
                7: "Jul", 8: "Aug", 9: "Sep", 10: "Oct", 11: "Nov", 12: "Dec"}
 
-PAGES = ["General Fleet View", "Service Provider Level", "Vehicle Level", "Fleet Benchmarking", "Fleet Benchmark", "AI Insights"]
+PAGES = ["General Fleet View", "Service Provider Level", "Vehicle Level", "Fleet Benchmark", "AI Insights"]
 # A page selector (instead of st.tabs) means only the SELECTED page's code
 # below actually runs on each rerun — st.tabs executes every tab's body on
 # every rerun regardless of which one is visible, which was the single
@@ -736,126 +736,7 @@ if page == "Vehicle Level":
         st.dataframe(pivot_veh_count, use_container_width=True)
 
 # =============================================================================
-# TAB 4: Fleet Benchmarking — Amazon Best PPK vs Other Fleets
-# =============================================================================
-if page == "Fleet Benchmarking":
-    st.subheader("Fleet Benchmarking — Amazon Best PPK vs Other Fleets")
-    st.markdown(
-        "Compare **Amazon (Best PPK fleets)** against all other customer groups "
-        "on key cost and volume metrics per material group."
-    )
-
-    BENCHMARK_FLEET = "Amazon"
-    has_benchmark = BENCHMARK_FLEET in filtered["CUSTOMER_GROUP"].unique()
-
-    if not has_benchmark:
-        st.warning(
-            f"No data for **{BENCHMARK_FLEET}** in the current filters. "
-            "Make sure the Amazon fleet contracts are included in the export and no sidebar filter excludes them."
-        )
-    else:
-        benchmark_df = filtered.copy()
-        benchmark_df["FLEET_CATEGORY"] = np.where(
-            benchmark_df["CUSTOMER_GROUP"] == BENCHMARK_FLEET, BENCHMARK_FLEET, "Other Fleets"
-        )
-
-        # --- KPI comparison ---
-        kpi = (
-            benchmark_df.groupby("FLEET_CATEGORY", observed=True)
-            .agg(
-                TOTAL_EURO=("NET_PRICE_EURO", "sum"),
-                TOTAL_QTY=("PO_QTY", "sum"),
-                LINE_COUNT=("PO_QTY", "count"),
-                UNIQUE_VEHICLES=("LICENCE_PLATE", "nunique"),
-            )
-            .reset_index()
-        )
-        kpi["AVG_EURO_PER_UNIT"] = kpi["TOTAL_EURO"] / kpi["TOTAL_QTY"].replace(0, 1)
-        kpi["AVG_EURO_PER_VEHICLE"] = kpi["TOTAL_EURO"] / kpi["UNIQUE_VEHICLES"].replace(0, 1)
-
-        st.subheader("High-Level KPIs")
-        col1, col2 = st.columns(2)
-        for i, row in kpi.iterrows():
-            target = col1 if row["FLEET_CATEGORY"] == BENCHMARK_FLEET else col2
-            with target:
-                st.markdown(f"**{row['FLEET_CATEGORY']}**")
-                st.metric("Total € Spend", f"€{row['TOTAL_EURO']:,.2f}", border=True)
-                st.metric("Total Qty", f"{row['TOTAL_QTY']:,.0f}", border=True)
-                st.metric("Unique Vehicles", f"{row['UNIQUE_VEHICLES']:,}", border=True)
-                st.metric("Avg € / Unit", f"€{row['AVG_EURO_PER_UNIT']:,.2f}", border=True)
-                st.metric("Avg € / Vehicle", f"€{row['AVG_EURO_PER_VEHICLE']:,.2f}", border=True)
-
-        # --- Per Material Group comparison ---
-        st.subheader("Cost per Unit by Material Group")
-        st.caption("Average € per unit (NET_PRICE_EURO / PO_QTY) — Amazon vs Other Fleets.")
-
-        mat_bench = (
-            benchmark_df.groupby(["FLEET_CATEGORY", "MATERIAL_GROUP"], observed=True)
-            .agg(
-                TOTAL_EURO=("NET_PRICE_EURO", "sum"),
-                TOTAL_QTY=("PO_QTY", "sum"),
-            )
-            .reset_index()
-        )
-        mat_bench["AVG_UNIT_PRICE"] = mat_bench["TOTAL_EURO"] / mat_bench["TOTAL_QTY"].replace(0, 1)
-
-        pivot_bench = mat_bench.pivot_table(
-            index="MATERIAL_GROUP", columns="FLEET_CATEGORY", values="AVG_UNIT_PRICE", fill_value=0
-        )
-        if BENCHMARK_FLEET in pivot_bench.columns and "Other Fleets" in pivot_bench.columns:
-            pivot_bench["Difference (€)"] = pivot_bench[BENCHMARK_FLEET] - pivot_bench["Other Fleets"]
-            pivot_bench["Difference (%)"] = np.where(
-                pivot_bench["Other Fleets"] > 0,
-                ((pivot_bench[BENCHMARK_FLEET] - pivot_bench["Other Fleets"]) / pivot_bench["Other Fleets"]) * 100,
-                0,
-            )
-        pivot_bench.index.name = "Material Group"
-        st.dataframe(pivot_bench.style.format("{:,.2f}"), use_container_width=True)
-
-        with st.container(border=True):
-            st.markdown("**Avg € / Unit by Material Group**")
-            chart_data = mat_bench.pivot_table(
-                index="MATERIAL_GROUP", columns="FLEET_CATEGORY", values="AVG_UNIT_PRICE", fill_value=0
-            )
-            st.bar_chart(chart_data)
-
-        # --- Monthly trend comparison ---
-        st.subheader("Monthly € Spend Trend")
-        monthly_bench = (
-            benchmark_df.groupby(["FLEET_CATEGORY", "PO_POSTING_MONTH"], observed=True)
-            .agg(TOTAL_EURO=("NET_PRICE_EURO", "sum"))
-            .reset_index()
-        )
-        monthly_bench["MONTH_NAME"] = monthly_bench["PO_POSTING_MONTH"].map(month_names)
-        pivot_monthly_bench = monthly_bench.pivot_table(
-            index=["PO_POSTING_MONTH", "MONTH_NAME"], columns="FLEET_CATEGORY", values="TOTAL_EURO", fill_value=0
-        )
-        pivot_monthly_bench = pivot_monthly_bench.sort_index(level="PO_POSTING_MONTH")
-        pivot_monthly_bench = pivot_monthly_bench.droplevel("PO_POSTING_MONTH")
-        with st.container(border=True):
-            st.markdown("**€ Spend by Month**")
-            st.bar_chart(pivot_monthly_bench)
-
-        # --- Volume mix comparison ---
-        st.subheader("Volume Mix by Material Group")
-        st.caption("Share of total quantity per material group for each fleet category.")
-
-        vol_mix = (
-            benchmark_df.groupby(["FLEET_CATEGORY", "MATERIAL_GROUP"], observed=True)
-            .agg(TOTAL_QTY=("PO_QTY", "sum"))
-            .reset_index()
-        )
-        vol_totals = vol_mix.groupby("FLEET_CATEGORY", observed=True)["TOTAL_QTY"].transform("sum")
-        vol_mix["QTY_SHARE_PCT"] = (vol_mix["TOTAL_QTY"] / vol_totals.replace(0, 1)) * 100
-
-        pivot_vol = vol_mix.pivot_table(
-            index="MATERIAL_GROUP", columns="FLEET_CATEGORY", values="QTY_SHARE_PCT", fill_value=0
-        )
-        pivot_vol.index.name = "Material Group"
-        st.dataframe(pivot_vol.style.format("{:.1f}%"), use_container_width=True)
-
-# =============================================================================
-# TAB 5: Fleet Benchmark — TAAS vs Best/Worst PPK vs Best/Worst PAYGO
+# TAB 4: Fleet Benchmark — TAAS vs Best/Worst PPK vs Best/Worst PAYGO
 # =============================================================================
 if page == "Fleet Benchmark":
     st.subheader("Fleet Benchmark — TAAS vs PPK vs PAYGO")
@@ -1253,7 +1134,7 @@ against four comparison groups drawn from Pay-Per-Kilometre (PPK) and Pay-As-You
                                     )
 
 # =============================================================================
-# TAB 6: AI Insights — Cost Reduction & Service Provider Misbehaviour Detection
+# TAB 5: AI Insights — Cost Reduction & Service Provider Misbehaviour Detection
 # =============================================================================
 if page == "AI Insights":
     st.subheader("AI Insights — Unnecessary Costs & Service Provider Anomalies")
