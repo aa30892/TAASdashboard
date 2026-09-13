@@ -96,6 +96,69 @@ elif data_source == "Use Server Files by Category (Local)":
         st.info("Please select at least one of the TAAS, PPK, or PAYGO files to proceed.")
         st.stop()
 
+# --- Memory-optimization helpers -------------------------------------------
+# Raw SQL-export columns the app never reads anywhere (verified by grep across
+# the whole file) — dropped as early as possible so they never take up memory,
+# and so st.cache_data's per-access deep copy has less to copy.
+UNUSED_RAW_COLUMNS = [
+    "CUSTOMER_NAME", "FOS_CONTRACT_ID", "MATERIAL_ID", "MATERIAL_GROUP_DESC",
+    "VEHICLE_ID", "JOB_NOTIFICATION_ID", "JOB_TYPE_CODE",
+]
+
+# Low/medium-cardinality text columns worth storing as pandas `category` dtype
+# (each distinct value stored once + a small integer code per row, instead of
+# a duplicated Python string per row). Safe to combine with groupby() because
+# every .groupby(...) call in this app now passes observed=True, so filtering
+# never cross-joins in unused categories.
+CATEGORY_DTYPE_COLUMNS = [
+    "CUSTOMER_GROUP", "MATERIAL_GROUP", "MATERIAL_DESC", "FLEET_CATEGORY",
+    "FLEET_TYPE_GROUP", "FLEET_TYPE", "VENDOR_NAME", "LICENCE_PLATE",
+]
+
+def _prepare_dataframe(df_in):
+    """One-time cleanup + memory optimization for a freshly loaded/combined
+    DataFrame. Called ONLY from inside the @st.cache_data-decorated loaders
+    below, so this work runs once per unique cached input instead of on every
+    rerun of the script."""
+    df_in = df_in.copy()
+    df_in.columns = df_in.columns.str.upper().str.strip()
+
+    cols_to_drop = [c for c in UNUSED_RAW_COLUMNS if c in df_in.columns]
+    if cols_to_drop:
+        df_in = df_in.drop(columns=cols_to_drop)
+
+    # Derive month from the full date, then drop the (bulkier) date column —
+    # nothing downstream in the app uses PO_POSTING_DATE once the month exists.
+    if "PO_POSTING_DATE" in df_in.columns:
+        df_in["PO_POSTING_DATE"] = pd.to_datetime(df_in["PO_POSTING_DATE"], errors="coerce")
+        if "PO_POSTING_MONTH" not in df_in.columns:
+            df_in["PO_POSTING_MONTH"] = df_in["PO_POSTING_DATE"].dt.month
+        df_in = df_in.drop(columns=["PO_POSTING_DATE"])
+
+    # Default-fill classification columns that aren't part of REQUIRED_COLUMNS
+    # (MATERIAL_GROUP is intentionally left alone here — it's required, and
+    # should still trigger the missing-column error below if truly absent).
+    if "CUSTOMER_GROUP" not in df_in.columns:
+        df_in["CUSTOMER_GROUP"] = "Other"
+    if "FLEET_CATEGORY" not in df_in.columns:
+        df_in["FLEET_CATEGORY"] = "Other"
+    if "FLEET_TYPE_GROUP" not in df_in.columns:
+        df_in["FLEET_TYPE_GROUP"] = "Other"
+
+    # Numeric downcasting — smaller dtypes where the value range allows it.
+    if "PO_QTY" in df_in.columns:
+        df_in["PO_QTY"] = pd.to_numeric(df_in["PO_QTY"], downcast="integer")
+    if "NET_PRICE_EURO" in df_in.columns:
+        df_in["NET_PRICE_EURO"] = pd.to_numeric(df_in["NET_PRICE_EURO"], downcast="float")
+    if "PO_POSTING_MONTH" in df_in.columns:
+        df_in["PO_POSTING_MONTH"] = pd.to_numeric(df_in["PO_POSTING_MONTH"], downcast="integer")
+
+    for col in CATEGORY_DTYPE_COLUMNS:
+        if col in df_in.columns:
+            df_in[col] = df_in[col].astype("category")
+
+    return df_in
+
 # Load Data based on selection
 @st.cache_data
 def load_data(source_type, upload_obj=None, path_str=None):
@@ -105,10 +168,11 @@ def load_data(source_type, upload_obj=None, path_str=None):
             df_loaded = pd.read_parquet(buf)
         else:
             df_loaded = pd.read_csv(buf)
-        return df_loaded
     elif source_type == "Use Server File (Local)" and path_str is not None:
-        return pd.read_csv(path_str)
-    return pd.DataFrame()
+        df_loaded = pd.read_csv(path_str)
+    else:
+        return pd.DataFrame()
+    return _prepare_dataframe(df_loaded)
 
 def _read_any_source(source):
     """Read a CSV/Parquet source into a DataFrame, whether it's an uploaded
@@ -141,9 +205,10 @@ def load_fleet_category_sources(source_dict):
             part["FLEET_TYPE_GROUP"] = category
         frames.append(part)
         loaded_categories.append(category)
-    if frames:
-        return pd.concat(frames, ignore_index=True, sort=False), loaded_categories
-    return pd.DataFrame(), loaded_categories
+    if not frames:
+        return pd.DataFrame(), loaded_categories
+    combined = pd.concat(frames, ignore_index=True, sort=False)
+    return _prepare_dataframe(combined), loaded_categories
 
 loaded_categories = None  # only meaningful for the two by-category data sources
 if data_source == "Upload by Fleet Category (3 files)":
@@ -152,7 +217,6 @@ elif data_source == "Use Server Files by Category (Local)":
     df, loaded_categories = load_fleet_category_sources({k: v for k, v in local_fleet_paths.items() if v is not None})
 else:
     df = load_data(data_source, upload_obj=uploaded_file, path_str=local_file_path)
-df.columns = df.columns.str.upper().str.strip()
 
 if df.empty:
     st.warning("No data returned. Check filters or file content.")
@@ -177,21 +241,13 @@ if missing:
     )
     st.stop()
 
-# Ensure date columns
-if "PO_POSTING_DATE" in df.columns:
-    df["PO_POSTING_DATE"] = pd.to_datetime(df["PO_POSTING_DATE"], errors="coerce")
-if "PO_POSTING_MONTH" not in df.columns and "PO_POSTING_DATE" in df.columns:
-    df["PO_POSTING_MONTH"] = df["PO_POSTING_DATE"].dt.month
-
-# Use CUSTOMER_GROUP and MATERIAL_GROUP from the SQL export directly
-if "CUSTOMER_GROUP" not in df.columns:
-    df["CUSTOMER_GROUP"] = "Other"
+# MATERIAL_GROUP is required above; still default-fill it here in case a
+# caller ever adds it to the non-required list, matching the pre-existing
+# behavior of the other classification columns.
 if "MATERIAL_GROUP" not in df.columns:
     df["MATERIAL_GROUP"] = "Other"
-if "FLEET_CATEGORY" not in df.columns and "CUSTOMER_GROUP" in df.columns:
-    df["FLEET_CATEGORY"] = "Other"
-if "FLEET_TYPE_GROUP" not in df.columns:
-    df["FLEET_TYPE_GROUP"] = "Other"
+elif df["MATERIAL_GROUP"].dtype.name != "category":
+    df["MATERIAL_GROUP"] = df["MATERIAL_GROUP"].astype("category")
 
 # Sidebar filters
 with st.sidebar:
@@ -231,7 +287,7 @@ with st.sidebar:
         selected_fleet_type_groups = []
 
 # Apply filters
-filtered = df.copy()
+filtered = df  # boolean-mask filtering below always returns a new object, never a view
 if selected_customers:
     filtered = filtered[filtered["CUSTOMER_GROUP"].isin(selected_customers)]
 if selected_groups:
@@ -248,16 +304,21 @@ st.metric("Total Records", f"{len(filtered):,}", border=True)
 month_names = {1: "Jan", 2: "Feb", 3: "Mar", 4: "Apr", 5: "May", 6: "Jun",
                7: "Jul", 8: "Aug", 9: "Sep", 10: "Oct", 11: "Nov", 12: "Dec"}
 
-tab_material, tab_vendor, tab_vehicle, tab_benchmark, tab_fleet_bench, tab_ai = st.tabs(["General Fleet View", "Service Provider Level", "Vehicle Level", "Fleet Benchmarking", "Fleet Benchmark", "AI Insights"])
+PAGES = ["General Fleet View", "Service Provider Level", "Vehicle Level", "Fleet Benchmarking", "Fleet Benchmark", "AI Insights"]
+# A page selector (instead of st.tabs) means only the SELECTED page's code
+# below actually runs on each rerun — st.tabs executes every tab's body on
+# every rerun regardless of which one is visible, which was the single
+# biggest memory/CPU cost in this app for larger datasets.
+page = st.radio("Navigate to", PAGES, horizontal=True, key="page_selector", label_visibility="collapsed")
 
 # =============================================================================
 # TAB 1: Material Group Analysis
 # =============================================================================
-with tab_material:
+if page == "General Fleet View":
     st.subheader("Material Group Totals — Month to Month")
 
     month_group = (
-        filtered.groupby(["PO_POSTING_MONTH", "MATERIAL_GROUP"])
+        filtered.groupby(["PO_POSTING_MONTH", "MATERIAL_GROUP"], observed=True)
         .agg(
             TOTAL_QTY=("PO_QTY", "sum"),
             TOTAL_EURO=("NET_PRICE_EURO", "sum"),
@@ -293,7 +354,7 @@ with tab_material:
     st.subheader("Summary by Material Group")
 
     group_summary = (
-        filtered.groupby("MATERIAL_GROUP")
+        filtered.groupby("MATERIAL_GROUP", observed=True)
         .agg(
             TOTAL_QTY=("PO_QTY", "sum"),
             TOTAL_EURO=("NET_PRICE_EURO", "sum"),
@@ -349,7 +410,7 @@ with tab_material:
     st.subheader("Customer Group × Material Group")
 
     cust_group = (
-        filtered.groupby(["CUSTOMER_GROUP", "MATERIAL_GROUP"])
+        filtered.groupby(["CUSTOMER_GROUP", "MATERIAL_GROUP"], observed=True)
         .agg(
             TOTAL_EURO=("NET_PRICE_EURO", "sum"),
             LINE_COUNT=("PO_QTY", "count"),
@@ -370,7 +431,7 @@ with tab_material:
 # =============================================================================
 # TAB 2: Vendor Analysis
 # =============================================================================
-with tab_vendor:
+if page == "Service Provider Level":
     st.subheader("Vendor Totals — Month to Month")
 
     # Vendor-level filters
@@ -389,14 +450,14 @@ with tab_vendor:
             key="vendor_tab_exclude",
         )
 
-    vendor_filtered = filtered.copy()
+    vendor_filtered = filtered  # boolean-mask filtering below always returns a new object
     if selected_vendors:
         vendor_filtered = vendor_filtered[vendor_filtered["VENDOR_NAME"].isin(selected_vendors)]
     if excluded_vendors:
         vendor_filtered = vendor_filtered[~vendor_filtered["VENDOR_NAME"].isin(excluded_vendors)]
 
     month_vendor = (
-        vendor_filtered.groupby(["PO_POSTING_MONTH", "VENDOR_NAME"])
+        vendor_filtered.groupby(["PO_POSTING_MONTH", "VENDOR_NAME"], observed=True)
         .agg(
             TOTAL_QTY=("PO_QTY", "sum"),
             TOTAL_EURO=("NET_PRICE_EURO", "sum"),
@@ -432,7 +493,7 @@ with tab_vendor:
     st.subheader("Summary by Vendor")
 
     vendor_summary = (
-        vendor_filtered.groupby("VENDOR_NAME")
+        vendor_filtered.groupby("VENDOR_NAME", observed=True)
         .agg(
             TOTAL_QTY=("PO_QTY", "sum"),
             TOTAL_EURO=("NET_PRICE_EURO", "sum"),
@@ -488,7 +549,7 @@ with tab_vendor:
     st.subheader("Customer Group × Vendor")
 
     cust_vendor = (
-        vendor_filtered.groupby(["CUSTOMER_GROUP", "VENDOR_NAME"])
+        vendor_filtered.groupby(["CUSTOMER_GROUP", "VENDOR_NAME"], observed=True)
         .agg(
             TOTAL_EURO=("NET_PRICE_EURO", "sum"),
             LINE_COUNT=("PO_QTY", "count"),
@@ -517,7 +578,7 @@ with tab_vendor:
     qty_filtered_v = vendor_filtered[vendor_filtered["PO_POSTING_MONTH"].isin([month_options_v[m] for m in selected_months_v])]
 
     vendor_mat_qty = (
-        qty_filtered_v.groupby(["VENDOR_NAME", "MATERIAL_GROUP"])
+        qty_filtered_v.groupby(["VENDOR_NAME", "MATERIAL_GROUP"], observed=True)
         .agg(TOTAL_QTY=("PO_QTY", "sum"))
         .reset_index()
     )
@@ -534,11 +595,11 @@ with tab_vendor:
 # =============================================================================
 # TAB 3: Vehicle Level Analysis
 # =============================================================================
-with tab_vehicle:
+if page == "Vehicle Level":
     st.subheader("Vehicle Totals — Month to Month")
 
     month_vehicle = (
-        filtered.groupby(["PO_POSTING_MONTH", "LICENCE_PLATE", "CUSTOMER_GROUP"])
+        filtered.groupby(["PO_POSTING_MONTH", "LICENCE_PLATE", "CUSTOMER_GROUP"], observed=True)
         .agg(
             TOTAL_QTY=("PO_QTY", "sum"),
             TOTAL_EURO=("NET_PRICE_EURO", "sum"),
@@ -554,7 +615,7 @@ with tab_vehicle:
     with col1:
         with st.container(border=True):
             st.markdown("**€ Total per Customer Group by Month (Vehicle Level)**")
-            pivot_euro_veh = month_vehicle.groupby(["MONTH_NUM", "MONTH_NAME", "CUSTOMER_GROUP"]).agg(
+            pivot_euro_veh = month_vehicle.groupby(["MONTH_NUM", "MONTH_NAME", "CUSTOMER_GROUP"], observed=True).agg(
                 TOTAL_EURO=("TOTAL_EURO", "sum")
             ).reset_index().pivot_table(
                 index=["MONTH_NUM", "MONTH_NAME"], columns="CUSTOMER_GROUP", values="TOTAL_EURO", fill_value=0
@@ -566,7 +627,7 @@ with tab_vehicle:
     with col2:
         with st.container(border=True):
             st.markdown("**Vehicle Count per Customer Group by Month**")
-            veh_count = month_vehicle.groupby(["MONTH_NUM", "MONTH_NAME", "CUSTOMER_GROUP"]).agg(
+            veh_count = month_vehicle.groupby(["MONTH_NUM", "MONTH_NAME", "CUSTOMER_GROUP"], observed=True).agg(
                 VEHICLE_COUNT=("LICENCE_PLATE", "nunique")
             ).reset_index().pivot_table(
                 index=["MONTH_NUM", "MONTH_NAME"], columns="CUSTOMER_GROUP", values="VEHICLE_COUNT", fill_value=0
@@ -578,7 +639,7 @@ with tab_vehicle:
     st.subheader("Summary by Vehicle (Licence Plate)")
 
     vehicle_summary = (
-        filtered.groupby(["LICENCE_PLATE", "CUSTOMER_GROUP"])
+        filtered.groupby(["LICENCE_PLATE", "CUSTOMER_GROUP"], observed=True)
         .agg(
             TOTAL_QTY=("PO_QTY", "sum"),
             TOTAL_EURO=("NET_PRICE_EURO", "sum"),
@@ -611,7 +672,7 @@ with tab_vehicle:
     st.subheader("Monthly € Breakdown by Customer Group")
 
     pivot_monthly_veh = (
-        filtered.groupby(["CUSTOMER_GROUP", "PO_POSTING_MONTH"])
+        filtered.groupby(["CUSTOMER_GROUP", "PO_POSTING_MONTH"], observed=True)
         .agg(TOTAL_EURO=("NET_PRICE_EURO", "sum"))
         .reset_index()
         .pivot_table(index="CUSTOMER_GROUP", columns="PO_POSTING_MONTH", values="TOTAL_EURO", fill_value=0)
@@ -626,7 +687,7 @@ with tab_vehicle:
     st.subheader("Monthly Quantity Breakdown by Customer Group")
 
     pivot_qty_veh = (
-        filtered.groupby(["CUSTOMER_GROUP", "PO_POSTING_MONTH"])
+        filtered.groupby(["CUSTOMER_GROUP", "PO_POSTING_MONTH"], observed=True)
         .agg(TOTAL_QTY=("PO_QTY", "sum"))
         .reset_index()
         .pivot_table(index="CUSTOMER_GROUP", columns="PO_POSTING_MONTH", values="TOTAL_QTY", fill_value=0)
@@ -648,7 +709,7 @@ with tab_vehicle:
     qty_filtered_veh = filtered[filtered["PO_POSTING_MONTH"].isin([month_options_veh[m] for m in selected_months_veh])]
 
     veh_mat_qty = (
-        qty_filtered_veh.groupby(["CUSTOMER_GROUP", "MATERIAL_GROUP"])
+        qty_filtered_veh.groupby(["CUSTOMER_GROUP", "MATERIAL_GROUP"], observed=True)
         .agg(
             TOTAL_QTY=("PO_QTY", "sum"),
             VEHICLE_COUNT=("LICENCE_PLATE", "nunique"),
@@ -677,7 +738,7 @@ with tab_vehicle:
 # =============================================================================
 # TAB 4: Fleet Benchmarking — Amazon Best PPK vs Other Fleets
 # =============================================================================
-with tab_benchmark:
+if page == "Fleet Benchmarking":
     st.subheader("Fleet Benchmarking — Amazon Best PPK vs Other Fleets")
     st.markdown(
         "Compare **Amazon (Best PPK fleets)** against all other customer groups "
@@ -700,7 +761,7 @@ with tab_benchmark:
 
         # --- KPI comparison ---
         kpi = (
-            benchmark_df.groupby("FLEET_CATEGORY")
+            benchmark_df.groupby("FLEET_CATEGORY", observed=True)
             .agg(
                 TOTAL_EURO=("NET_PRICE_EURO", "sum"),
                 TOTAL_QTY=("PO_QTY", "sum"),
@@ -729,7 +790,7 @@ with tab_benchmark:
         st.caption("Average € per unit (NET_PRICE_EURO / PO_QTY) — Amazon vs Other Fleets.")
 
         mat_bench = (
-            benchmark_df.groupby(["FLEET_CATEGORY", "MATERIAL_GROUP"])
+            benchmark_df.groupby(["FLEET_CATEGORY", "MATERIAL_GROUP"], observed=True)
             .agg(
                 TOTAL_EURO=("NET_PRICE_EURO", "sum"),
                 TOTAL_QTY=("PO_QTY", "sum"),
@@ -761,7 +822,7 @@ with tab_benchmark:
         # --- Monthly trend comparison ---
         st.subheader("Monthly € Spend Trend")
         monthly_bench = (
-            benchmark_df.groupby(["FLEET_CATEGORY", "PO_POSTING_MONTH"])
+            benchmark_df.groupby(["FLEET_CATEGORY", "PO_POSTING_MONTH"], observed=True)
             .agg(TOTAL_EURO=("NET_PRICE_EURO", "sum"))
             .reset_index()
         )
@@ -780,11 +841,11 @@ with tab_benchmark:
         st.caption("Share of total quantity per material group for each fleet category.")
 
         vol_mix = (
-            benchmark_df.groupby(["FLEET_CATEGORY", "MATERIAL_GROUP"])
+            benchmark_df.groupby(["FLEET_CATEGORY", "MATERIAL_GROUP"], observed=True)
             .agg(TOTAL_QTY=("PO_QTY", "sum"))
             .reset_index()
         )
-        vol_totals = vol_mix.groupby("FLEET_CATEGORY")["TOTAL_QTY"].transform("sum")
+        vol_totals = vol_mix.groupby("FLEET_CATEGORY", observed=True)["TOTAL_QTY"].transform("sum")
         vol_mix["QTY_SHARE_PCT"] = (vol_mix["TOTAL_QTY"] / vol_totals.replace(0, 1)) * 100
 
         pivot_vol = vol_mix.pivot_table(
@@ -796,7 +857,7 @@ with tab_benchmark:
 # =============================================================================
 # TAB 5: Fleet Benchmark — TAAS vs Best/Worst PPK vs Best/Worst PAYGO
 # =============================================================================
-with tab_fleet_bench:
+if page == "Fleet Benchmark":
     st.subheader("Fleet Benchmark — TAAS vs PPK vs PAYGO")
     st.markdown(
         """This tab benchmarks **TAAS fleets** (Transalliance, Chatel, Taldea, Garnier, Eychenne, ID Logistics, Veolia)
@@ -842,7 +903,7 @@ against four comparison groups drawn from Pay-Per-Kilometre (PPK) and Pay-As-You
         # differently-tagged file still shows up instead of being silently dropped.
         CATEGORIES += sorted(c for c in cats_in_data if c not in PREFERRED_CATEGORY_ORDER)
 
-        bench_df = filtered[filtered["FLEET_CATEGORY"].isin(CATEGORIES)].copy()
+        bench_df = filtered[filtered["FLEET_CATEGORY"].isin(CATEGORIES)]  # boolean-mask indexing already returns a new object
 
         if bench_df.empty:
             st.warning("No data for the recognized fleet categories (TAAS / PPK / PAYGO) in the current filters.")
@@ -852,7 +913,7 @@ against four comparison groups drawn from Pay-Per-Kilometre (PPK) and Pay-As-You
             # --- 1. High-Level KPI Comparison ---
             st.subheader("1. High-Level KPIs by Fleet Category")
             kpi = (
-                bench_df.groupby("FLEET_CATEGORY")
+                bench_df.groupby("FLEET_CATEGORY", observed=True)
                 .agg(
                     TOTAL_EURO=("NET_PRICE_EURO", "sum"),
                     TOTAL_QTY=("PO_QTY", "sum"),
@@ -883,7 +944,7 @@ against four comparison groups drawn from Pay-Per-Kilometre (PPK) and Pay-As-You
             st.caption("Side-by-side average unit cost (NET_PRICE_EURO / PO_QTY) for each fleet category.")
 
             mat_bench = (
-                bench_df.groupby(["FLEET_CATEGORY", "MATERIAL_GROUP"])
+                bench_df.groupby(["FLEET_CATEGORY", "MATERIAL_GROUP"], observed=True)
                 .agg(TOTAL_EURO=("NET_PRICE_EURO", "sum"), TOTAL_QTY=("PO_QTY", "sum"))
                 .reset_index()
             )
@@ -916,11 +977,11 @@ against four comparison groups drawn from Pay-Per-Kilometre (PPK) and Pay-As-You
             st.caption("Each column sums to 100% — shows how each fleet category allocates its volume across material groups.")
 
             vol_mix = (
-                bench_df.groupby(["FLEET_CATEGORY", "MATERIAL_GROUP"])
+                bench_df.groupby(["FLEET_CATEGORY", "MATERIAL_GROUP"], observed=True)
                 .agg(TOTAL_QTY=("PO_QTY", "sum"))
                 .reset_index()
             )
-            vol_totals = vol_mix.groupby("FLEET_CATEGORY")["TOTAL_QTY"].transform("sum")
+            vol_totals = vol_mix.groupby("FLEET_CATEGORY", observed=True)["TOTAL_QTY"].transform("sum")
             vol_mix["QTY_SHARE_PCT"] = (vol_mix["TOTAL_QTY"] / vol_totals.replace(0, 1)) * 100
 
             pivot_vol = vol_mix.pivot_table(
@@ -933,7 +994,7 @@ against four comparison groups drawn from Pay-Per-Kilometre (PPK) and Pay-As-You
             # --- 5. Monthly Spend Trend ---
             st.subheader("5. Monthly € Spend Trend")
             monthly = (
-                bench_df.groupby(["FLEET_CATEGORY", "PO_POSTING_MONTH"])
+                bench_df.groupby(["FLEET_CATEGORY", "PO_POSTING_MONTH"], observed=True)
                 .agg(TOTAL_EURO=("NET_PRICE_EURO", "sum"))
                 .reset_index()
             )
@@ -951,7 +1012,7 @@ against four comparison groups drawn from Pay-Per-Kilometre (PPK) and Pay-As-You
             # --- 6. Avg € per Vehicle by Month ---
             st.subheader("6. Avg € per Vehicle by Month")
             monthly_veh = (
-                bench_df.groupby(["FLEET_CATEGORY", "PO_POSTING_MONTH"])
+                bench_df.groupby(["FLEET_CATEGORY", "PO_POSTING_MONTH"], observed=True)
                 .agg(TOTAL_EURO=("NET_PRICE_EURO", "sum"), UNIQUE_VEHICLES=("LICENCE_PLATE", "nunique"))
                 .reset_index()
             )
@@ -1009,7 +1070,7 @@ against four comparison groups drawn from Pay-Per-Kilometre (PPK) and Pay-As-You
                 st.info("TAAS data not available for the global conclusion.")
             else:
                 broad_totals = (
-                    conclusion_df.groupby("BROAD_GROUP")
+                    conclusion_df.groupby("BROAD_GROUP", observed=True)
                     .agg(
                         TOTAL_EURO=("NET_PRICE_EURO", "sum"),
                         TOTAL_QTY=("PO_QTY", "sum"),
@@ -1104,7 +1165,7 @@ against four comparison groups drawn from Pay-Per-Kilometre (PPK) and Pay-As-You
                     )
 
                     mg_totals = (
-                        conclusion_df.groupby(["BROAD_GROUP", "MATERIAL_GROUP"])
+                        conclusion_df.groupby(["BROAD_GROUP", "MATERIAL_GROUP"], observed=True)
                         .agg(TOTAL_EURO=("NET_PRICE_EURO", "sum"), TOTAL_QTY=("PO_QTY", "sum"))
                         .reset_index()
                     )
@@ -1194,7 +1255,7 @@ against four comparison groups drawn from Pay-Per-Kilometre (PPK) and Pay-As-You
 # =============================================================================
 # TAB 6: AI Insights — Cost Reduction & Service Provider Misbehaviour Detection
 # =============================================================================
-with tab_ai:
+if page == "AI Insights":
     st.subheader("AI Insights — Unnecessary Costs & Service Provider Anomalies")
     st.markdown(
         """Statistical analysis to identify **cost reduction opportunities** and
@@ -1212,7 +1273,7 @@ with tab_ai:
 
     # Compute unit prices safely
     vendor_pricing = (
-        filtered.groupby(["VENDOR_NAME", "MATERIAL_GROUP"])
+        filtered.groupby(["VENDOR_NAME", "MATERIAL_GROUP"], observed=True)
         .agg(
             TOTAL_EURO=("NET_PRICE_EURO", "sum"),
             TOTAL_QTY=("PO_QTY", "sum"),
@@ -1223,7 +1284,7 @@ with tab_ai:
     vendor_pricing["AVG_UNIT_PRICE"] = vendor_pricing["TOTAL_EURO"] / vendor_pricing["TOTAL_QTY"].replace(0, 1)
 
     # Compute group median and std
-    group_stats = vendor_pricing.groupby("MATERIAL_GROUP")["AVG_UNIT_PRICE"].agg(["median", "std"]).reset_index()
+    group_stats = vendor_pricing.groupby("MATERIAL_GROUP", observed=True)["AVG_UNIT_PRICE"].agg(["median", "std"]).reset_index()
     group_stats.columns = ["MATERIAL_GROUP", "GROUP_MEDIAN_PRICE", "GROUP_STD_PRICE"]
     vendor_pricing = vendor_pricing.merge(group_stats, on="MATERIAL_GROUP", how="left")
     vendor_pricing["GROUP_STD_PRICE"] = vendor_pricing["GROUP_STD_PRICE"].fillna(0)
@@ -1271,11 +1332,11 @@ with tab_ai:
     st.caption("Vendors with monthly quantity spikes >2x their own average.")
 
     vendor_monthly = (
-        filtered.groupby(["VENDOR_NAME", "PO_POSTING_MONTH"])
+        filtered.groupby(["VENDOR_NAME", "PO_POSTING_MONTH"], observed=True)
         .agg(MONTHLY_QTY=("PO_QTY", "sum"), MONTHLY_EURO=("NET_PRICE_EURO", "sum"))
         .reset_index()
     )
-    vendor_avg = vendor_monthly.groupby("VENDOR_NAME")["MONTHLY_QTY"].agg(["mean", "std"]).reset_index()
+    vendor_avg = vendor_monthly.groupby("VENDOR_NAME", observed=True)["MONTHLY_QTY"].agg(["mean", "std"]).reset_index()
     vendor_avg.columns = ["VENDOR_NAME", "AVG_MONTHLY_QTY", "STD_MONTHLY_QTY"]
     vendor_monthly = vendor_monthly.merge(vendor_avg, on="VENDOR_NAME", how="left")
     vendor_monthly["SPIKE_RATIO"] = np.where(
@@ -1309,11 +1370,11 @@ with tab_ai:
     st.caption("Vehicles whose total spend exceeds the 95th percentile for their customer group.")
 
     vehicle_costs = (
-        filtered.groupby(["LICENCE_PLATE", "CUSTOMER_GROUP"])
+        filtered.groupby(["LICENCE_PLATE", "CUSTOMER_GROUP"], observed=True)
         .agg(TOTAL_EURO=("NET_PRICE_EURO", "sum"), TOTAL_QTY=("PO_QTY", "sum"), PO_LINES=("PO_QTY", "count"))
         .reset_index()
     )
-    p95 = vehicle_costs.groupby("CUSTOMER_GROUP")["TOTAL_EURO"].quantile(0.95).reset_index()
+    p95 = vehicle_costs.groupby("CUSTOMER_GROUP", observed=True)["TOTAL_EURO"].quantile(0.95).reset_index()
     p95.columns = ["CUSTOMER_GROUP", "P95_EURO"]
     vehicle_costs = vehicle_costs.merge(p95, on="CUSTOMER_GROUP", how="left")
 
@@ -1341,11 +1402,11 @@ with tab_ai:
     st.caption("Material groups where a single vendor captures >70% of total spend — potential dependency or lack of competitive pricing.")
 
     vendor_share = (
-        filtered.groupby(["MATERIAL_GROUP", "VENDOR_NAME"])
+        filtered.groupby(["MATERIAL_GROUP", "VENDOR_NAME"], observed=True)
         .agg(VENDOR_EURO=("NET_PRICE_EURO", "sum"))
         .reset_index()
     )
-    group_total = filtered.groupby("MATERIAL_GROUP")["NET_PRICE_EURO"].sum().reset_index()
+    group_total = filtered.groupby("MATERIAL_GROUP", observed=True)["NET_PRICE_EURO"].sum().reset_index()
     group_total.columns = ["MATERIAL_GROUP", "GROUP_TOTAL_EURO"]
     vendor_share = vendor_share.merge(group_total, on="MATERIAL_GROUP", how="left")
     vendor_share["SHARE_PCT"] = (vendor_share["VENDOR_EURO"] / vendor_share["GROUP_TOTAL_EURO"]) * 100
@@ -1386,7 +1447,7 @@ with tab_ai:
 
     if "LICENCE_PLATE" in filtered.columns and "PO_POSTING_MONTH" in filtered.columns:
         veh_monthly = (
-            filtered.groupby(["PO_POSTING_MONTH", "LICENCE_PLATE", "CUSTOMER_GROUP"])
+            filtered.groupby(["PO_POSTING_MONTH", "LICENCE_PLATE", "CUSTOMER_GROUP"], observed=True)
             .agg(
                 TOTAL_EURO=("NET_PRICE_EURO", "sum"),
                 TOTAL_QTY=("PO_QTY", "sum"),
@@ -1434,10 +1495,10 @@ with tab_ai:
         st.caption(f"Vehicles that appear in the top {top_n} most expensive list across multiple months.")
         top_per_month = (
             veh_monthly.sort_values(["PO_POSTING_MONTH", "TOTAL_EURO"], ascending=[True, False])
-            .groupby("PO_POSTING_MONTH")
+            .groupby("PO_POSTING_MONTH", observed=True)
             .head(top_n)
         )
-        repeat_counts = top_per_month.groupby(["LICENCE_PLATE", "CUSTOMER_GROUP"]).agg(
+        repeat_counts = top_per_month.groupby(["LICENCE_PLATE", "CUSTOMER_GROUP"], observed=True).agg(
             MONTHS_IN_TOP=("PO_POSTING_MONTH", "count"),
             TOTAL_EURO=("TOTAL_EURO", "sum"),
             TOTAL_QTY=("TOTAL_QTY", "sum"),
