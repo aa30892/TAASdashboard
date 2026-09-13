@@ -759,8 +759,7 @@ against four comparison groups drawn from Pay-Per-Kilometre (PPK) and Pay-As-You
 4. **Volume Mix** — percentage split of quantity; reveals different service usage patterns between fleet types
 5. **Monthly Trends** — spot seasonal patterns or divergence over time
 6. **Avg € per Vehicle by Month** — normalised efficiency trend (removes fleet-size bias)
-7. **TAAS vs Others Difference** — the bottom-line table: positive values mean the other category pays *more* per unit than TAAS
-8. **Conclusion — TAAS vs PPK vs PAYGO (Global)** — Best + Worst PPK rolled into one PPK benchmark, Best + Worst PAYGO rolled into one PAYGO benchmark: the direct answer to "are TAAS material costs higher, lower, or normal?"
+7. **Conclusion — TAAS vs PPK vs PAYGO (Global)** — Best + Worst PPK rolled into one PPK benchmark, Best + Worst PAYGO rolled into one PAYGO benchmark: the direct answer to "are TAAS material costs higher, lower, or normal?"
 """
     )
 
@@ -909,23 +908,9 @@ against four comparison groups drawn from Pay-Per-Kilometre (PPK) and Pay-As-You
                 st.markdown("**Avg € per Vehicle by Month**")
                 st.bar_chart(pivot_avg_veh)
 
-            # --- 7. TAAS vs Others — Difference Table ---
-            st.subheader("7. TAAS vs Others — Unit Price Difference")
-            st.caption("How much more (+) or less (-) each category pays per unit compared to TAAS.")
-            if "TAAS" in pivot_cpu.columns:
-                diff_table = pivot_cpu.copy()
-                for col in diff_table.columns:
-                    if col != "TAAS":
-                        diff_table[col] = diff_table[col] - diff_table["TAAS"]
-                diff_table = diff_table.drop(columns=["TAAS"], errors="ignore")
-                diff_table.index.name = "Material Group"
-                st.dataframe(diff_table.style.format("€{:+,.2f}"), use_container_width=True)
-            else:
-                st.info("TAAS data not available for difference calculation.")
-
-            # --- 8. Conclusion — TAAS vs PPK vs PAYGO (Global) ---
+            # --- 7. Conclusion — TAAS vs PPK vs PAYGO (Global) ---
             st.divider()
-            st.subheader("8. Conclusion — TAAS vs PPK vs PAYGO (Global)")
+            st.subheader("7. Conclusion — TAAS vs PPK vs PAYGO (Global)")
             st.markdown(
                 "Rolls **Best + Worst PPK** into one PPK benchmark and **Best + Worst PAYGO** into "
                 "one PAYGO benchmark, then answers the core question directly: overall, are **TAAS** "
