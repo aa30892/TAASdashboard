@@ -939,15 +939,12 @@ against four comparison groups drawn from Pay-Per-Kilometre (PPK) and Pay-As-You
                     conclusion_df.groupby("BROAD_GROUP", observed=True)
                     .agg(
                         TOTAL_EURO=("NET_PRICE_EURO", "sum"),
-                        TOTAL_QTY=("PO_QTY", "sum"),
                         UNIQUE_VEHICLES=("LICENCE_PLATE", "nunique"),
                     )
                 )
-                broad_totals["AVG_UNIT_PRICE"] = broad_totals["TOTAL_EURO"] / broad_totals["TOTAL_QTY"].replace(0, 1)
                 broad_totals["AVG_EURO_PER_VEHICLE"] = (
                     broad_totals["TOTAL_EURO"] / broad_totals["UNIQUE_VEHICLES"].replace(0, 1)
                 )
-                taas_avg_overall = broad_totals.loc["TAAS", "AVG_UNIT_PRICE"]
                 taas_avg_per_vehicle = broad_totals.loc["TAAS", "AVG_EURO_PER_VEHICLE"]
                 taas_vehicles = broad_totals.loc["TAAS", "UNIQUE_VEHICLES"]
 
@@ -966,25 +963,22 @@ against four comparison groups drawn from Pay-Per-Kilometre (PPK) and Pay-As-You
                     # --- Headline verdict ---
                     st.markdown("**Headline verdict**")
                     st.caption(
-                        "Compares both the blended avg €/unit AND the avg €/vehicle, since a fleet "
-                        "category with far more (or fewer) vehicles can look very different per unit "
-                        "than per vehicle — fleet size for each group is shown for context."
+                        "Compares avg €/vehicle, normalised for fleet size — fleet size for each group "
+                        "is shown for context, since a category with far more (or fewer) vehicles "
+                        "changes what per-vehicle figures mean."
                     )
                     headline_verdicts = {}
                     headline_cols = st.columns(len(other_broad_groups))
                     for col, group in zip(headline_cols, other_broad_groups):
-                        other_avg = broad_totals.loc[group, "AVG_UNIT_PRICE"]
                         other_avg_veh = broad_totals.loc[group, "AVG_EURO_PER_VEHICLE"]
                         other_vehicles = broad_totals.loc[group, "UNIQUE_VEHICLES"]
 
-                        pct_diff_unit = ((taas_avg_overall - other_avg) / other_avg * 100) if other_avg else 0.0
                         pct_diff_veh = (
                             (taas_avg_per_vehicle - other_avg_veh) / other_avg_veh * 100
                         ) if other_avg_veh else 0.0
 
-                        unit_verdict, unit_tone = _verdict(pct_diff_unit)
                         veh_verdict, veh_tone = _verdict(pct_diff_veh)
-                        headline_verdicts[group] = (unit_verdict, pct_diff_unit, veh_verdict, pct_diff_veh)
+                        headline_verdicts[group] = (veh_verdict, pct_diff_veh)
 
                         with col:
                             st.markdown(f"**TAAS vs {group}**")
@@ -1001,21 +995,11 @@ against four comparison groups drawn from Pay-Per-Kilometre (PPK) and Pay-As-You
                                         "figures reflect very different operating scales."
                                     )
                             st.metric(
-                                "Avg € / Unit",
-                                f"€{taas_avg_overall:,.2f}",
-                                delta=f"{pct_diff_unit:+.1f}% vs {group} (€{other_avg:,.2f})",
-                                delta_color="inverse",
-                                border=True,
-                            )
-                            st.metric(
                                 "Avg € / Vehicle",
                                 f"€{taas_avg_per_vehicle:,.0f}",
                                 delta=f"{pct_diff_veh:+.1f}% vs {group} (€{other_avg_veh:,.0f})",
                                 delta_color="inverse",
                                 border=True,
-                            )
-                            getattr(st, unit_tone)(
-                                f"Per-unit cost: TAAS is **{unit_verdict}** than {group} ({pct_diff_unit:+.1f}%)."
                             )
                             getattr(st, veh_tone)(
                                 f"Per-vehicle cost: TAAS is **{veh_verdict}** than {group} ({pct_diff_veh:+.1f}%)."
